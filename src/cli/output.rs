@@ -1,0 +1,136 @@
+//! 终端输出格式化：彩色状态、人类可读表格、JSON。
+
+use colored::Colorize;
+use tabled::settings::Style;
+use tabled::{Table, Tabled};
+
+use crate::process::entry::{ProcessInfo, ProcessStatus};
+
+#[derive(Tabled)]
+struct Row {
+    #[tabled(rename = "id")]
+    id: u32,
+    #[tabled(rename = "name")]
+    name: String,
+    #[tabled(rename = "status")]
+    status: String,
+    #[tabled(rename = "pid")]
+    pid: String,
+    #[tabled(rename = "restarts")]
+    restarts: u32,
+    #[tabled(rename = "uptime")]
+    uptime: String,
+    #[tabled(rename = "mem")]
+    mem: String,
+}
+
+/// 是否应启用彩色：受 `--no-color`、`NO_COLOR`、TTY 共同控制。
+pub fn color_enabled(no_color_flag: bool) -> bool {
+    if no_color_flag || std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    std::io::IsTerminal::is_terminal(&std::io::stdout())
+}
+
+fn colorize_status(status: ProcessStatus, color: bool) -> String {
+    let s = status.to_string();
+    if !color {
+        return s;
+    }
+    match status {
+        ProcessStatus::Online => s.green().to_string(),
+        ProcessStatus::Errored => s.red().bold().to_string(),
+        ProcessStatus::Stopping | ProcessStatus::Launching => s.yellow().to_string(),
+        ProcessStatus::Stopped => s.dimmed().to_string(),
+    }
+}
+
+/// 渲染进程列表为表格。
+pub fn render_list(list: &[ProcessInfo], color: bool) -> String {
+    if list.is_empty() {
+        return "（无进程）".to_string();
+    }
+    let rows: Vec<Row> = list
+        .iter()
+        .map(|p| Row {
+            id: p.id,
+            name: p.name.clone(),
+            status: colorize_status(p.status, color),
+            pid: p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+            restarts: p.restarts,
+            uptime: human_duration(p.uptime_secs),
+            mem: if p.memory_bytes == 0 {
+                "-".to_string()
+            } else {
+                human_size(p.memory_bytes)
+            },
+        })
+        .collect();
+    Table::new(rows).with(Style::rounded()).to_string()
+}
+
+/// 渲染单个进程详情。
+pub fn render_info(p: &ProcessInfo, color: bool) -> String {
+    let mut out = String::new();
+    let line = |out: &mut String, k: &str, v: String| {
+        out.push_str(&format!("{:<14} {}\n", k, v));
+    };
+    line(&mut out, "id", p.id.to_string());
+    line(&mut out, "name", p.name.clone());
+    line(&mut out, "status", colorize_status(p.status, color));
+    line(
+        &mut out,
+        "command",
+        format!("{} {}", p.command, p.args.join(" ")),
+    );
+    line(
+        &mut out,
+        "pid",
+        p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+    );
+    line(&mut out, "restarts", p.restarts.to_string());
+    line(
+        &mut out,
+        "max_restarts",
+        p.max_restarts
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into()),
+    );
+    line(&mut out, "uptime", human_duration(p.uptime_secs));
+    line(&mut out, "restart", format!("{:?}", p.restart_strategy));
+    out
+}
+
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+pub fn human_duration(secs: u64) -> String {
+    if secs == 0 {
+        return "0s".to_string();
+    }
+    let d = secs / 86400;
+    let h = (secs % 86400) / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else if m > 0 {
+        format!("{m}m {s}s")
+    } else {
+        format!("{s}s")
+    }
+}
