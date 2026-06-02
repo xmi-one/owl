@@ -56,6 +56,18 @@ pub enum Commands {
     Flush { target: String },
     /// 清零重启计数
     Reset { target: String },
+    /// 按 owl.toml 声明式收敛（幂等；默认保留未列出的进程）
+    Apply {
+        /// 配置文件路径
+        #[arg(default_value = "owl.toml")]
+        file: String,
+        /// 删除配置中未列出的进程
+        #[arg(long)]
+        prune: bool,
+        /// 仅预览将执行的动作，不实际改变
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
     /// 运行时调整 Daemon 自身日志级别
     LogLevel { level: String },
     /// 终止 Daemon（在线子进程脱离存活）
@@ -87,8 +99,8 @@ pub struct StartArgs {
     #[arg(long)]
     pub port: Option<String>,
 
-    /// 内存上限，如 512M / 1G（Phase 2 生效）
-    #[arg(long, value_parser = parse_size)]
+    /// 内存上限，如 512M / 1G
+    #[arg(long, value_parser = crate::config::parse_size)]
     pub max_memory: Option<u64>,
 
     /// 最大连续重启次数
@@ -185,35 +197,4 @@ fn parse_kv(s: &str) -> Result<(String, String), String> {
 
 fn parse_strategy(s: &str) -> Result<RestartStrategy, String> {
     s.parse()
-}
-
-/// 解析人类可读大小，如 `512M` / `1G` / `1048576`。
-fn parse_size(s: &str) -> Result<u64, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("空的大小".into());
-    }
-    let upper = s.to_ascii_uppercase();
-    let (num_part, mult): (&str, u64) = if let Some(n) = upper.strip_suffix("GB") {
-        (n, 1024 * 1024 * 1024)
-    } else if let Some(n) = upper.strip_suffix("MB") {
-        (n, 1024 * 1024)
-    } else if let Some(n) = upper.strip_suffix("KB") {
-        (n, 1024)
-    } else if let Some(n) = upper.strip_suffix('G') {
-        (n, 1024 * 1024 * 1024)
-    } else if let Some(n) = upper.strip_suffix('M') {
-        (n, 1024 * 1024)
-    } else if let Some(n) = upper.strip_suffix('K') {
-        (n, 1024)
-    } else if let Some(n) = upper.strip_suffix('B') {
-        (n, 1)
-    } else {
-        (upper.as_str(), 1)
-    };
-    let value: f64 = num_part
-        .trim()
-        .parse()
-        .map_err(|_| format!("无法解析大小: {s}"))?;
-    Ok((value * mult as f64) as u64)
 }

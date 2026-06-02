@@ -27,8 +27,8 @@ impl std::str::FromStr for RestartStrategy {
     }
 }
 
-/// 健康检查配置（Phase 2 起生效，Phase 1 仅承载字段）。
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// 健康检查配置。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct HealthCheckConfig {
     /// HTTP 探针 URL，支持 `{port}` 占位符。
     pub url: Option<String>,

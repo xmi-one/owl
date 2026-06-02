@@ -62,6 +62,7 @@ pub enum Request {
     Logs { target: String, lines: usize, follow: bool },
     Flush { target: String },
     Reset { target: String },
+    Apply { apps: Vec<StartOptions>, prune: bool, dry_run: bool },
     SetLogLevel { level: String },
     Kill,
 }

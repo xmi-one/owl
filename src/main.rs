@@ -2,6 +2,7 @@
 
 mod cli;
 mod common;
+mod config;
 mod daemon;
 mod ipc;
 mod log;

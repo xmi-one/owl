@@ -44,6 +44,11 @@ where
         Request::Delete { target } => reply_result(writer, mgr.delete(target).await).await,
         Request::Reset { target } => reply_result(writer, mgr.reset(target).await).await,
         Request::Flush { target } => reply_result(writer, mgr.flush(target).await).await,
+        Request::Apply {
+            apps,
+            prune,
+            dry_run,
+        } => reply_result(writer, mgr.apply(apps, prune, dry_run).await).await,
         Request::List => {
             let resp = match mgr.list().await {
                 Ok(list) => Response::ProcessList(list),

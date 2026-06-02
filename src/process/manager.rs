@@ -131,6 +131,12 @@ pub enum Cmd {
     LogPath(String, oneshot::Sender<Result<PathBuf>>),
     Flush(String, oneshot::Sender<Result<String>>),
     Reset(String, oneshot::Sender<Result<String>>),
+    Apply {
+        apps: Vec<StartOptions>,
+        prune: bool,
+        dry_run: bool,
+        reply: oneshot::Sender<Result<String>>,
+    },
     // 内部事件
     Exited { id: u32, success: bool },
     EscalateKill { id: u32 },
@@ -198,6 +204,22 @@ impl ManagerHandle {
     pub async fn reset(&self, target: String) -> Result<String> {
         let (tx, rx) = oneshot::channel();
         self.send(Cmd::Reset(target, tx))?;
+        rx.await.map_err(recv_err)?
+    }
+
+    pub async fn apply(
+        &self,
+        apps: Vec<StartOptions>,
+        prune: bool,
+        dry_run: bool,
+    ) -> Result<String> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Cmd::Apply {
+            apps,
+            prune,
+            dry_run,
+            reply: tx,
+        })?;
         rx.await.map_err(recv_err)?
     }
 
@@ -322,6 +344,14 @@ impl Manager {
                 Cmd::Reset(target, reply) => {
                     let _ = reply.send(self.handle_batch(&target, "reset", |m, id| m.reset_one(id)));
                 }
+                Cmd::Apply {
+                    apps,
+                    prune,
+                    dry_run,
+                    reply,
+                } => {
+                    let _ = reply.send(self.handle_apply(apps, prune, dry_run));
+                }
                 Cmd::Tick => self.handle_tick(),
                 Cmd::HealthResult {
                     id,
@@ -352,27 +382,9 @@ impl Manager {
         if self.apps.values().any(|a| a.cfg.name == name) {
             return Err(OwlError::AlreadyExists(name));
         }
-        let port = parse_single_port(opts.port.as_deref())?;
         let id = self.next_id;
+        let cfg = build_cfg(id, chrono::Utc::now().timestamp(), name, &opts)?;
         self.next_id += 1;
-        let cfg = PersistedApp {
-            id,
-            name,
-            command: opts.command,
-            args: opts.args,
-            cwd: opts.cwd,
-            env: opts.env,
-            port,
-            max_memory: opts.max_memory,
-            max_restarts: opts.max_restarts,
-            restart_strategy: opts.restart_strategy,
-            restart_delay_ms: opts.restart_delay_ms,
-            kill_signal: opts.kill_signal,
-            health_check: opts.health_check,
-            created_at: chrono::Utc::now().timestamp(),
-            last_pid: None,
-            last_pid_start_time: None,
-        };
         let mut app = App::from_cfg(cfg);
         let tx = self.tx.clone();
         spawn_proc(&tx, &mut app)?;
@@ -382,6 +394,101 @@ impl Manager {
         // 立即采一次（建立 CPU 基线 + 尽快展示内存）。
         let _ = self.tx.send(Cmd::Tick);
         Ok(info)
+    }
+
+    /// 声明式收敛（见 7.13）。返回人类可读的动作报告。
+    fn handle_apply(
+        &mut self,
+        specs: Vec<StartOptions>,
+        prune: bool,
+        dry_run: bool,
+    ) -> Result<String> {
+        use std::collections::HashSet;
+        let mut report: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for opts in specs {
+            let name = opts
+                .name
+                .clone()
+                .unwrap_or_else(|| derive_name(&opts.command));
+            seen.insert(name.clone());
+            let existing = self
+                .apps
+                .values()
+                .find(|a| a.cfg.name == name)
+                .map(|a| a.cfg.id);
+
+            match existing {
+                None => {
+                    report.push(format!("+ start   {name}"));
+                    if !dry_run {
+                        let mut o = opts;
+                        o.name = Some(name.clone());
+                        if let Err(e) = self.handle_start(o) {
+                            report.push(format!("  ! {name} 启动失败: {e}"));
+                        }
+                    }
+                }
+                Some(id) => {
+                    let created = self.apps[&id].cfg.created_at;
+                    let new_cfg = build_cfg(id, created, name.clone(), &opts)?;
+                    if key_fields_differ(&self.apps[&id].cfg, &new_cfg) {
+                        report.push(format!("~ restart {name} (关键字段变更)"));
+                        if !dry_run {
+                            if let Some(app) = self.apps.get_mut(&id) {
+                                let mut cfg = new_cfg;
+                                cfg.last_pid = app.cfg.last_pid;
+                                cfg.last_pid_start_time = app.cfg.last_pid_start_time;
+                                app.cfg = cfg;
+                            }
+                            let _ = self.restart_one(id);
+                        }
+                    } else if non_key_differ(&self.apps[&id].cfg, &new_cfg) {
+                        report.push(format!("= update  {name} (原地更新，无需重启)"));
+                        if !dry_run {
+                            if let Some(app) = self.apps.get_mut(&id) {
+                                app.cfg.max_restarts = new_cfg.max_restarts;
+                                app.cfg.restart_delay_ms = new_cfg.restart_delay_ms;
+                                app.cfg.restart_strategy = new_cfg.restart_strategy;
+                                app.cfg.kill_signal = new_cfg.kill_signal;
+                                app.cfg.max_memory = new_cfg.max_memory;
+                                app.cfg.health_check = new_cfg.health_check;
+                            }
+                        }
+                    } else {
+                        report.push(format!("  ok      {name} (无变化)"));
+                    }
+                }
+            }
+        }
+
+        let unlisted: Vec<(u32, String)> = self
+            .apps
+            .values()
+            .filter(|a| !seen.contains(&a.cfg.name))
+            .map(|a| (a.cfg.id, a.cfg.name.clone()))
+            .collect();
+        for (id, nm) in unlisted {
+            if prune {
+                report.push(format!("- prune   {nm}"));
+                if !dry_run {
+                    let _ = self.delete_one(id);
+                }
+            } else {
+                report.push(format!("  keep    {nm} (未在配置中，保留)"));
+            }
+        }
+
+        if !dry_run {
+            self.persist();
+        }
+        let header = if dry_run {
+            "apply --dry-run 预览："
+        } else {
+            "apply 完成："
+        };
+        Ok(format!("{header}\n{}", report.join("\n")))
     }
 
     fn handle_batch<F>(&mut self, target: &str, verb: &str, mut f: F) -> Result<String>
@@ -863,6 +970,48 @@ fn spawn_health(
             }
         }
     });
+}
+
+/// 由 `StartOptions` 构造持久化配置（解析端口；保留传入 id/created_at）。
+fn build_cfg(id: u32, created_at: i64, name: String, opts: &StartOptions) -> Result<PersistedApp> {
+    let port = parse_single_port(opts.port.as_deref())?;
+    Ok(PersistedApp {
+        id,
+        name,
+        command: opts.command.clone(),
+        args: opts.args.clone(),
+        cwd: opts.cwd.clone(),
+        env: opts.env.clone(),
+        port,
+        max_memory: opts.max_memory,
+        max_restarts: opts.max_restarts,
+        restart_strategy: opts.restart_strategy,
+        restart_delay_ms: opts.restart_delay_ms,
+        kill_signal: opts.kill_signal.clone(),
+        health_check: opts.health_check.clone(),
+        created_at,
+        last_pid: None,
+        last_pid_start_time: None,
+    })
+}
+
+/// 关键字段差异（变更需重启生效，见 7.13）。
+fn key_fields_differ(a: &PersistedApp, b: &PersistedApp) -> bool {
+    a.command != b.command
+        || a.args != b.args
+        || a.cwd != b.cwd
+        || a.env != b.env
+        || a.port != b.port
+}
+
+/// 非关键字段差异（原地更新即可，无需重启）。
+fn non_key_differ(a: &PersistedApp, b: &PersistedApp) -> bool {
+    a.max_restarts != b.max_restarts
+        || a.restart_delay_ms != b.restart_delay_ms
+        || a.restart_strategy != b.restart_strategy
+        || a.kill_signal != b.kill_signal
+        || a.max_memory != b.max_memory
+        || a.health_check != b.health_check
 }
 
 /// 解析单个端口（范围 / `auto:` 属多实例特性，见 7.9，后续增量支持）。

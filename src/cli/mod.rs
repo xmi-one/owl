@@ -80,6 +80,28 @@ pub async fn run(cli: Cli) -> i32 {
         Commands::Delete { target } => simple(Request::Delete { target }, color).await,
         Commands::Flush { target } => simple(Request::Flush { target }, color).await,
         Commands::Reset { target } => simple(Request::Reset { target }, color).await,
+        Commands::Apply {
+            file,
+            prune,
+            dry_run,
+        } => {
+            let apps = match crate::config::load_file(&file) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("{}", if color { e.to_string().red().to_string() } else { e.to_string() });
+                    return EXIT_ERR;
+                }
+            };
+            simple(
+                Request::Apply {
+                    apps,
+                    prune,
+                    dry_run,
+                },
+                color,
+            )
+            .await
+        }
         Commands::LogLevel { level } => simple(Request::SetLogLevel { level }, color).await,
         Commands::Logs {
             target,
