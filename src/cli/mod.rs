@@ -88,7 +88,7 @@ pub async fn run(cli: Cli) -> i32 {
             prune,
             dry_run,
         } => {
-            let apps = match crate::config::load_file(&file) {
+            let apps = match crate::config::load_file_auto(&file) {
                 Ok(a) => a,
                 Err(e) => {
                     eprintln!("{}", if color { e.to_string().red().to_string() } else { e.to_string() });

@@ -88,6 +88,9 @@ owl apply owl.toml
 
 # 同时删除配置外进程
 owl apply owl.toml --prune
+
+# PM2 ecosystem.config.json 兼容（常见字段子集）
+owl apply ecosystem.config.json
 ```
 
 ## 日志说明
