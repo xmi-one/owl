@@ -47,6 +47,8 @@ anyhow = "1"
 owl-logger = "0.2.0"
 axum = { version = "0.8", features = ["ws", "json"] }
 flate2 = "1"
+ratatui = "0.29.0"
+crossterm = "0.29.0"
 
 [target.'cfg(unix)'.dependencies]
 # Unix 信号 / setsid / flock

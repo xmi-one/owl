@@ -7,11 +7,23 @@ pub mod output;
 pub mod service;
 
 use colored::Colorize;
+use crossterm::event::{self, Event, KeyCode};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use clap::CommandFactory;
 use clap_complete::{generate, shells};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, TableState};
 
 use crate::common::paths;
 use crate::ipc::message::{Request, Response};
+use crate::process::entry::ProcessInfo;
 use client::Client;
 use commands::{Cli, Commands, CompletionShell, ServiceCommands, ServiceTarget};
 
@@ -367,6 +379,13 @@ async fn logs(target: String, lines: usize, follow: bool, color: bool) -> i32 {
 }
 
 async fn monit(interval_secs: u64, count: Option<u32>, json: bool, color: bool) -> i32 {
+    if !json && count.is_none() {
+        return monit_tui(interval_secs).await;
+    }
+    monit_plain(interval_secs, count, json, color).await
+}
+
+async fn monit_plain(interval_secs: u64, count: Option<u32>, json: bool, color: bool) -> i32 {
     let sleep = std::time::Duration::from_secs(interval_secs.max(1));
     let mut n = 0u32;
     loop {
@@ -405,6 +424,174 @@ async fn monit(interval_secs: u64, count: Option<u32>, json: bool, color: bool) 
         }
         tokio::time::sleep(sleep).await;
     }
+}
+
+async fn monit_tui(interval_secs: u64) -> i32 {
+    if let Err(e) = enable_raw_mode() {
+        eprintln!("无法启用终端 raw 模式: {e}");
+        return EXIT_ERR;
+    }
+    let mut stdout = std::io::stdout();
+    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        eprintln!("无法进入备用屏幕: {e}");
+        return EXIT_ERR;
+    }
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = match Terminal::new(backend) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = disable_raw_mode();
+            eprintln!("初始化 TUI 失败: {e}");
+            return EXIT_ERR;
+        }
+    };
+
+    let mut last: Vec<ProcessInfo> = Vec::new();
+    let mut selected: usize = 0;
+    let refresh_every = std::time::Duration::from_secs(interval_secs.max(1));
+    let mut next_refresh = std::time::Instant::now();
+    let mut last_error: Option<String> = None;
+
+    loop {
+        let _ = terminal.draw(|f| {
+            let size = f.area();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(8), Constraint::Length(8), Constraint::Length(1)])
+                .split(size);
+
+            let header = Row::new(vec![
+                "id", "name", "status", "pid", "uptime", "cpu", "mem", "health",
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD));
+            let rows: Vec<Row> = last
+                .iter()
+                .map(|p| {
+                    let status_color = match p.status.to_string().as_str() {
+                        "online" => Color::Green,
+                        "errored" => Color::Red,
+                        "launching" | "stopping" => Color::Yellow,
+                        _ => Color::DarkGray,
+                    };
+                    Row::new(vec![
+                        p.id.to_string(),
+                        p.name.clone(),
+                        p.status.to_string(),
+                        p.pid.map(|x| x.to_string()).unwrap_or_else(|| "-".into()),
+                        output::human_duration(p.uptime_secs),
+                        if p.status.to_string() == "online" {
+                            format!("{:.1}%", p.cpu_percent)
+                        } else {
+                            "-".into()
+                        },
+                        if p.memory_bytes == 0 {
+                            "-".into()
+                        } else {
+                            output::human_size(p.memory_bytes)
+                        },
+                        format!("{:?}", p.health).to_lowercase(),
+                    ])
+                    .style(Style::default().fg(status_color))
+                })
+                .collect();
+
+            let table = Table::new(
+                rows,
+                [
+                    Constraint::Length(4),
+                    Constraint::Length(16),
+                    Constraint::Length(10),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                    Constraint::Length(10),
+                    Constraint::Length(10),
+                ],
+            )
+            .header(header)
+            .block(Block::default().title("owl monit").borders(Borders::ALL))
+            .row_highlight_style(Style::default().bg(Color::DarkGray))
+            .highlight_symbol(">> ");
+            let mut table_state = TableState::default();
+            if !last.is_empty() {
+                if selected >= last.len() {
+                    selected = last.len() - 1;
+                }
+                table_state.select(Some(selected));
+            }
+            f.render_stateful_widget(table, chunks[0], &mut table_state);
+
+            let detail = if let Some(p) = last.get(selected) {
+                format!(
+                    "name: {}\ncmd: {} {}\nrestarts: {}\nport: {}\nmax_memory: {}",
+                    p.name,
+                    p.command,
+                    p.args.join(" "),
+                    p.restarts,
+                    p.port.map(|x| x.to_string()).unwrap_or_else(|| "-".into()),
+                    p.max_memory
+                        .map(output::human_size)
+                        .unwrap_or_else(|| "-".into()),
+                )
+            } else {
+                "暂无进程".to_string()
+            };
+            let detail_widget =
+                Paragraph::new(detail).block(Block::default().title("detail").borders(Borders::ALL));
+            f.render_widget(detail_widget, chunks[1]);
+
+            let tip = if let Some(e) = &last_error {
+                format!("q:退出  ↑/↓:选择  r:立即刷新   error: {e}")
+            } else {
+                "q:退出  ↑/↓:选择  r:立即刷新".to_string()
+            };
+            f.render_widget(Paragraph::new(Line::from(tip)), chunks[2]);
+        });
+
+        if event::poll(std::time::Duration::from_millis(80)).unwrap_or(false) {
+            if let Ok(Event::Key(k)) = event::read() {
+                match k.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Down => {
+                        if !last.is_empty() {
+                            selected = (selected + 1).min(last.len() - 1);
+                        }
+                    }
+                    KeyCode::Up => {
+                        selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Char('r') => match one_shot(Request::List).await {
+                        Ok(Response::ProcessList(list)) => {
+                            last = list;
+                            last_error = None;
+                        }
+                        Ok(other) => last_error = Some(format!("unexpected: {other:?}")),
+                        Err(code) => last_error = Some(format!("request failed: {code}")),
+                    },
+                    _ => {}
+                }
+            }
+        }
+
+        if std::time::Instant::now() >= next_refresh {
+            match one_shot(Request::List).await {
+                Ok(Response::ProcessList(list)) => {
+                    last = list;
+                    last_error = None;
+                }
+                Ok(other) => last_error = Some(format!("unexpected: {other:?}")),
+                Err(code) => last_error = Some(format!("request failed: {code}")),
+            }
+            next_refresh = std::time::Instant::now() + refresh_every;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let _ = disable_raw_mode();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = terminal.show_cursor();
+    EXIT_OK
 }
 
 fn print_log_line(line: &str, color: bool) {
