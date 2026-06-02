@@ -1,7 +1,11 @@
 //! 子进程 stdout/stderr 异步管道采集与文件写入，及日志尾部读取。
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use chrono::Local;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 
@@ -31,6 +35,7 @@ where
                 return;
             }
         };
+        let mut current_day = day_stamp();
 
         let mut lines = BufReader::new(reader).lines();
         loop {
@@ -47,7 +52,7 @@ where
                         owl_logger::warn!("写日志失败({}): {e}", path.display());
                         break;
                     }
-                    rotate_if_needed(&path, &mut file).await;
+                    rotate_if_needed(&path, &mut file, &mut current_day).await;
                 }
                 Ok(None) => break, // EOF：管道关闭
                 Err(e) => {
@@ -60,7 +65,16 @@ where
     });
 }
 
-async fn rotate_if_needed(path: &Path, file: &mut tokio::fs::File) {
+async fn rotate_if_needed(path: &Path, file: &mut tokio::fs::File, current_day: &mut String) {
+    // 1) 按日期切分：跨天时把昨日日志归档为 .YYYY-MM-DD.log.gz
+    let today = day_stamp();
+    if &today != current_day {
+        rotate_by_date(path, file, current_day.clone()).await;
+        *current_day = today;
+        return;
+    }
+
+    // 2) 按大小滚动：保留 .1 ~ .N
     let len = match file.metadata().await {
         Ok(m) => m.len(),
         Err(_) => return,
@@ -69,13 +83,6 @@ async fn rotate_if_needed(path: &Path, file: &mut tokio::fs::File) {
         return;
     }
     let _ = file.flush().await;
-    drop(std::mem::replace(
-        file,
-        match OpenOptions::new().create(true).append(true).open(path).await {
-            Ok(f) => f,
-            Err(_) => return,
-        },
-    ));
     // backup rollover: .4 -> .5, ... .1 -> .2, current -> .1
     for i in (1..=MAX_BACKUPS).rev() {
         let src = if i == 1 {
@@ -89,8 +96,57 @@ async fn rotate_if_needed(path: &Path, file: &mut tokio::fs::File) {
         }
     }
     if let Ok(newf) = OpenOptions::new().create(true).append(true).open(path).await {
-        *file = newf;
+        let old = std::mem::replace(file, newf);
+        drop(old);
     }
+}
+
+fn day_stamp() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
+async fn rotate_by_date(path: &Path, file: &mut tokio::fs::File, day: String) {
+    let _ = file.flush().await;
+    let archived = PathBuf::from(format!("{}.{}.log", path.display(), day));
+    if tokio::fs::rename(path, &archived).await.is_err() {
+        return;
+    }
+    if let Ok(newf) = OpenOptions::new().create(true).append(true).open(path).await {
+        let old = std::mem::replace(file, newf);
+        drop(old);
+    }
+    let _ = gzip_file(archived).await;
+}
+
+async fn gzip_file(path: PathBuf) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let mut input =
+            std::fs::File::open(&path).map_err(|e| format!("打开归档失败({}): {e}", path.display()))?;
+        let gz_path = PathBuf::from(format!("{}.gz", path.display()));
+        let output = std::fs::File::create(&gz_path)
+            .map_err(|e| format!("创建 gzip 失败({}): {e}", gz_path.display()))?;
+        let mut encoder = GzEncoder::new(output, Compression::default());
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = input
+                .read(&mut buf)
+                .map_err(|e| format!("读取归档失败({}): {e}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+            encoder
+                .write_all(&buf[..n])
+                .map_err(|e| format!("写入 gzip 失败({}): {e}", gz_path.display()))?;
+        }
+        encoder
+            .finish()
+            .map_err(|e| format!("完成 gzip 失败({}): {e}", gz_path.display()))?;
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("删除原归档失败({}): {e}", path.display()))?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| format!("gzip 任务失败: {e}"))?
 }
 
 /// 读取日志文件末尾 `n` 行（MVP：整文件读取，后续按 seek 优化）。

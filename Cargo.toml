@@ -46,6 +46,7 @@ anyhow = "1"
 # Daemon 自身日志（自家生态）
 owl-logger = "0.2.0"
 axum = { version = "0.8", features = ["ws", "json"] }
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 # Unix 信号 / setsid / flock
