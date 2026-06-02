@@ -198,6 +198,7 @@ pub enum Request {
     Logs { target: String, lines: usize, follow: bool },
     Flush { target: String },             // 清空日志
     Reset { target: String },             // 清零重启计数
+    SetLogLevel { level: String },        // 运行时调 Daemon 自身日志级别（owl-logger set_level/set_filter）
     Apply { config_path: String, prune: bool, dry_run: bool }, // prune 删除已移除项；dry_run 仅预览 diff
     Kill, // 终止 Daemon（按方案 B，不杀在线子进程，仅退出 Daemon）
 }
@@ -396,13 +397,23 @@ restart_delay = 2000
 | `sysinfo` | 采集进程 CPU / 内存指标（**仅** targeted refresh，禁全量；后续按需替换为 `/proc` 原生解析，见 9.2） | 跨平台兜底 |
 | `thiserror` | 库内统一错误类型定义 (`common/errors.rs`) | — |
 | `anyhow` | 应用边界（main/handler）错误聚合与上下文 | — |
-| **`owl-logger`** | **Daemon 自身日志：彩色输出、文件轮转、gz 压缩、保留期清理、崩溃捕获、结构化 JSON** | **`0.1.4` (自家生态)** |
+| **`owl-logger`** | **Daemon 自身日志：彩色输出、按大小/日期轮转 + gz 压缩、保留期清理、panic+Backtrace 捕获、结构化 JSON、运行时动态调级、PII 脱敏、按级别分文件(error.log)** | **`0.2.0` (自家生态)**；`otlp` feature **默认关闭**(会拉入 reqwest，与 9.1 精简 footprint 冲突) |
 | `axum` + `tokio-tungstenite` | HTTP API + WebSocket (Phase 2/3) | 可选 feature，默认关闭以保持核心二进制精简 |
 | ~~`reqwest`~~ | HTTP 健康检查 | **不引入**：探针只需 `GET /health → 2xx`，用裸 `TcpStream` 手写最小请求（省 1–2MB 依赖树，见 9.1） |
 | `ratatui` + `crossterm` | `owl monit` 终端实时监控面板 (Phase 3) | 可选 feature |
 
 > [!TIP]
-> `owl-logger` 是 Owl 生态的姊妹项目 ([xmi-one/owl-logger](https://github.com/xmi-one/owl-logger))，基于 `tracing` 构建。使用它替代手动配置 `tracing-subscriber`，可获得：一行初始化、按大小自动轮转+gz压缩、保留期自动清理、panic 堆栈捕获、运行时动态调级等生产级能力，且与 Owl 品牌统一。
+> `owl-logger` 是 Owl 生态的姊妹项目 ([xmi-one/owl-logger](https://github.com/xmi-one/owl-logger))，基于 `tracing` 构建，**当前 `0.2.0`**。用它替代手动配置 `tracing-subscriber`，Daemon 可直接获得生产级日志能力，并与 Owl 品牌统一。Owl 重点借用以下 0.2.0 能力：
+> - **一行初始化 + 环境变量配置**：`owl_logger::try_init_from_env()` 读取 `OWL_LOG_LEVEL`/`OWL_LOG_FORMAT`/`OWL_LOG_DIR`/`OWL_LOG_FILE`（与 Owl 自己的 `OWL_HOME` 不冲突）。
+> - **运行时动态调级**：`set_level`/`set_filter` 无需重启 Daemon 即可调日志详细度 → 暴露为 `owl log-level <level>` 命令（见 7.16/9.7）。
+> - **按级别分文件**：`error_file(LogLevel::Error)` 额外落 `owl-daemon.error.log`，便于运维快速排障。
+> - **panic + Backtrace 捕获**：与 9.5 的 per-task panic 隔离协同，崩溃栈直接进日志。
+> - **结构化 JSON + PII 脱敏**：`Json` 格式接 ELK/Datadog；自动脱敏 `password`/`token` 等字段，符合合规。
+> - **`Drop` 自动 flush + 有界异步队列(`lossy`/`buffered_lines_limit`)**：Daemon 自身日志非阻塞。
+>
+> ⚠️ **注意**：`owl-logger` 的 `otlp` feature 采用阻塞式 `reqwest` 上报 → 会把 reqwest 整棵依赖树拉回来，与 9.1「不引入 reqwest、精简 footprint」的目标冲突。因此 **OTLP 默认关闭**，仅在确需分布式追踪时按需开启（可归入 Phase 3）。
+>
+> 此外：`owl-logger` 仅负责 **Daemon 自身**日志；**子进程 stdout/stderr** 的采集/轮转是 Owl 自实现（`log/process_log.rs`，见 7.15/9.4），二者互不混淆。
 
 ---
 
@@ -800,6 +811,6 @@ panic = "unwind"       # 配合 9.5 的 per-task 隔离；不用 abort 以保 da
 
 - **人类可读输出**:`owl list` 内存 `125.3 MB`、uptime `3d 4h`、状态着色(Online 绿 / Errored 红 / Stopped 灰),列宽固定 + 超长截断。
 - **`owl apply --dry-run`**:先预览将「启动/重启/prune」哪些,确认后再执行 —— 生产改配置的安全阀。
-- **高频命令**:`owl reload`(无停机)、`owl scale <name> <n>`、`owl flush`、`owl reset`、`owl completions <shell>`(clap 生成补全)。
+- **高频命令**:`owl reload`(无停机)、`owl scale <name> <n>`、`owl flush`、`owl reset`、`owl log-level <level>`(运行时调 Daemon 日志级别,基于 owl-logger 动态调级)、`owl completions <shell>`(clap 生成补全)。
 - **名称语义**:同名已存在时明确报错(不静默覆盖);未给 `--name` 时由命令 basename 自动派生。
 - **友好错误 + 退出码**(见 7.16):daemon 连不上 / 版本不符 / cwd 不存在,均给可操作提示与可判别退出码。
