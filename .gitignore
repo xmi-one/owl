@@ -23,6 +23,7 @@ target/
 *.sublime-workspace
 *.sublime-project
 .directory
+README_TASK.md
 
 # ----------------------------------------------------------------------
 # OS generated files
