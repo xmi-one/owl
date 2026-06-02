@@ -117,6 +117,12 @@ pub async fn run(cli: Cli) -> i32 {
         Commands::Reload { target } => {
             reload_stream(target, color).await
         }
+        Commands::Save { file } => {
+            simple(Request::Save { file }, color).await
+        }
+        Commands::Resurrect { file } => {
+            simple(Request::Resurrect { file }, color).await
+        }
         Commands::Completions { shell } => {
             output_completions(shell);
             EXIT_OK

@@ -60,6 +60,18 @@ pub enum Commands {
     Scale { target: String, n: u32 },
     /// 无停机滚动重启（逐实例：重启→就绪→下一个）
     Reload { target: String },
+    /// 保存当前进程拓扑快照（用于开机恢复）
+    Save {
+        /// 快照文件路径（默认 $OWL_HOME/saved.json）
+        #[arg(long)]
+        file: Option<String>,
+    },
+    /// 按快照恢复进程（默认仅补齐缺失，不删除现有）
+    Resurrect {
+        /// 快照文件路径（默认 $OWL_HOME/saved.json）
+        #[arg(long)]
+        file: Option<String>,
+    },
     /// 生成 shell 补全脚本
     Completions {
         #[arg(value_enum)]

@@ -54,6 +54,8 @@ where
             reload_rolling(mgr, &target, writer).await?;
             Ok(false)
         }
+        Request::Save { file } => reply_result(writer, mgr.save(file).await).await,
+        Request::Resurrect { file } => reply_result(writer, mgr.resurrect(file).await).await,
         Request::List => {
             let resp = match mgr.list().await {
                 Ok(list) => Response::ProcessList(list),

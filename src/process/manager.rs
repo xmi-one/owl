@@ -9,6 +9,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::common::errors::{OwlError, Result};
@@ -143,6 +144,14 @@ pub enum Cmd {
         n: u32,
         reply: oneshot::Sender<Result<String>>,
     },
+    Save {
+        file: Option<String>,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    Resurrect {
+        file: Option<String>,
+        reply: oneshot::Sender<Result<String>>,
+    },
     // 内部事件
     Exited { id: u32, success: bool },
     EscalateKill { id: u32 },
@@ -236,6 +245,18 @@ impl ManagerHandle {
             n,
             reply: tx,
         })?;
+        rx.await.map_err(recv_err)?
+    }
+
+    pub async fn save(&self, file: Option<String>) -> Result<String> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Cmd::Save { file, reply: tx })?;
+        rx.await.map_err(recv_err)?
+    }
+
+    pub async fn resurrect(&self, file: Option<String>) -> Result<String> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Cmd::Resurrect { file, reply: tx })?;
         rx.await.map_err(recv_err)?
     }
 
@@ -382,6 +403,12 @@ impl Manager {
                 }
                 Cmd::Scale { target, n, reply } => {
                     let _ = reply.send(self.handle_scale(&target, n));
+                }
+                Cmd::Save { file, reply } => {
+                    let _ = reply.send(self.handle_save(file));
+                }
+                Cmd::Resurrect { file, reply } => {
+                    let _ = reply.send(self.handle_resurrect(file));
                 }
                 Cmd::Tick => self.handle_tick(),
                 Cmd::HealthResult {
@@ -612,6 +639,35 @@ impl Manager {
             "apply 完成："
         };
         Ok(format!("{header}\n{}", report.join("\n")))
+    }
+
+    /// 保存当前进程拓扑快照（按 name 聚合实例）。
+    fn handle_save(&self, file: Option<String>) -> Result<String> {
+        let path = snapshot_path(file.as_deref());
+        let snap = SnapshotFile {
+            schema_version: 1,
+            apps: snapshot_specs(&self.apps),
+        };
+        let bytes = serde_json::to_vec_pretty(&snap)
+            .map_err(|e| OwlError::Other(format!("序列化快照失败: {e}")))?;
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, bytes)
+            .map_err(|e| OwlError::Other(format!("写入快照失败({}): {e}", path.display())))?;
+        Ok(format!("已保存 {} 个应用到 {}", snap.apps.len(), path.display()))
+    }
+
+    /// 从快照恢复（等价 apply，默认不 prune）。
+    fn handle_resurrect(&mut self, file: Option<String>) -> Result<String> {
+        let path = snapshot_path(file.as_deref());
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| OwlError::Other(format!("读取快照失败({}): {e}", path.display())))?;
+        let snap: SnapshotFile = serde_json::from_str(&text)
+            .map_err(|e| OwlError::Other(format!("解析快照失败({}): {e}", path.display())))?;
+        let mut msg = self.handle_apply(snap.apps, false, false)?;
+        msg.push_str(&format!("\n(来源: {})", path.display()));
+        Ok(msg)
     }
 
     fn handle_batch<F>(&mut self, target: &str, verb: &str, mut f: F) -> Result<String>
@@ -1161,6 +1217,63 @@ fn parse_port_base(s: Option<&str>) -> Result<Option<u16>> {
 /// 解析单个端口（apply/build_cfg 用；范围取起始值）。
 fn parse_single_port(s: Option<&str>) -> Result<Option<u16>> {
     parse_port_base(s)
+}
+
+#[derive(Serialize, Deserialize)]
+struct SnapshotFile {
+    schema_version: u32,
+    apps: Vec<StartOptions>,
+}
+
+fn snapshot_path(file: Option<&str>) -> PathBuf {
+    match file {
+        Some(p) => PathBuf::from(p),
+        None => crate::common::paths::owl_home().join("saved.json"),
+    }
+}
+
+/// 将当前 apps 按 name 聚合成可复用的 StartOptions（instances>1）。
+fn snapshot_specs(apps: &HashMap<u32, App>) -> Vec<StartOptions> {
+    #[derive(Default)]
+    struct Group {
+        count: u32,
+        template: Option<PersistedApp>,
+    }
+    let mut groups: HashMap<String, Group> = HashMap::new();
+    for app in apps.values() {
+        let g = groups.entry(app.cfg.name.clone()).or_default();
+        g.count += 1;
+        if g.template.is_none() || app.cfg.instance_index == 0 {
+            g.template = Some(app.cfg.clone());
+        }
+    }
+    let mut out = Vec::new();
+    let mut names: Vec<String> = groups.keys().cloned().collect();
+    names.sort();
+    for name in names {
+        if let Some(g) = groups.get(&name) {
+            if let Some(t) = &g.template {
+                out.push(StartOptions {
+                    name: Some(name.clone()),
+                    command: t.command.clone(),
+                    args: t.args.clone(),
+                    cwd: t.cwd.clone(),
+                    env: t.env.clone(),
+                    instances: g.count.max(1),
+                    port: t.port_base.map(|p| p.to_string()),
+                    max_memory: t.max_memory,
+                    max_restarts: t.max_restarts,
+                    restart_delay_ms: t.restart_delay_ms,
+                    restart_strategy: t.restart_strategy,
+                    kill_signal: t.kill_signal.clone(),
+                    health_check: t.health_check.clone(),
+                    wait_ready: false,
+                    ready_timeout_secs: None,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// 轮询探测重接管进程的存活，消失则上报 Exited。

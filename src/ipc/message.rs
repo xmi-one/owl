@@ -65,6 +65,8 @@ pub enum Request {
     Apply { apps: Vec<StartOptions>, prune: bool, dry_run: bool },
     Scale { target: String, n: u32 },
     Reload { target: String },
+    Save { file: Option<String> },
+    Resurrect { file: Option<String> },
     SetLogLevel { level: String },
     Kill,
 }
