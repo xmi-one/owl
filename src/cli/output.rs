@@ -4,7 +4,7 @@ use colored::Colorize;
 use tabled::settings::Style;
 use tabled::{Table, Tabled};
 
-use crate::process::entry::{ProcessInfo, ProcessStatus};
+use crate::process::entry::{HealthState, ProcessInfo, ProcessStatus};
 
 #[derive(Tabled)]
 struct Row {
@@ -20,8 +20,12 @@ struct Row {
     restarts: u32,
     #[tabled(rename = "uptime")]
     uptime: String,
+    #[tabled(rename = "cpu")]
+    cpu: String,
     #[tabled(rename = "mem")]
     mem: String,
+    #[tabled(rename = "health")]
+    health: String,
 }
 
 /// 是否应启用彩色：受 `--no-color`、`NO_COLOR`、TTY 共同控制。
@@ -30,6 +34,22 @@ pub fn color_enabled(no_color_flag: bool) -> bool {
         return false;
     }
     std::io::IsTerminal::is_terminal(&std::io::stdout())
+}
+
+fn health_label(health: HealthState, color: bool) -> String {
+    let s = match health {
+        HealthState::Unknown => "-",
+        HealthState::Healthy => "healthy",
+        HealthState::Unhealthy => "unhealthy",
+    };
+    if !color {
+        return s.to_string();
+    }
+    match health {
+        HealthState::Unknown => s.dimmed().to_string(),
+        HealthState::Healthy => s.green().to_string(),
+        HealthState::Unhealthy => s.red().to_string(),
+    }
 }
 
 fn colorize_status(status: ProcessStatus, color: bool) -> String {
@@ -59,11 +79,17 @@ pub fn render_list(list: &[ProcessInfo], color: bool) -> String {
             pid: p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
             restarts: p.restarts,
             uptime: human_duration(p.uptime_secs),
+            cpu: if p.status == ProcessStatus::Online {
+                format!("{:.1}%", p.cpu_percent)
+            } else {
+                "-".to_string()
+            },
             mem: if p.memory_bytes == 0 {
                 "-".to_string()
             } else {
                 human_size(p.memory_bytes)
             },
+            health: health_label(p.health, color),
         })
         .collect();
     Table::new(rows).with(Style::rounded()).to_string()
@@ -78,6 +104,9 @@ pub fn render_info(p: &ProcessInfo, color: bool) -> String {
     line(&mut out, "id", p.id.to_string());
     line(&mut out, "name", p.name.clone());
     line(&mut out, "status", colorize_status(p.status, color));
+    if p.health != HealthState::Unknown {
+        line(&mut out, "health", health_label(p.health, color));
+    }
     line(
         &mut out,
         "command",
@@ -97,6 +126,18 @@ pub fn render_info(p: &ProcessInfo, color: bool) -> String {
             .unwrap_or_else(|| "-".into()),
     );
     line(&mut out, "uptime", human_duration(p.uptime_secs));
+    if p.status == ProcessStatus::Online {
+        line(&mut out, "cpu", format!("{:.1}%", p.cpu_percent));
+    }
+    if p.memory_bytes > 0 {
+        line(&mut out, "memory", human_size(p.memory_bytes));
+    }
+    if let Some(limit) = p.max_memory {
+        line(&mut out, "max_memory", human_size(limit));
+    }
+    if let Some(port) = p.port {
+        line(&mut out, "port", port.to_string());
+    }
     line(&mut out, "restart", format!("{:?}", p.restart_strategy));
     out
 }

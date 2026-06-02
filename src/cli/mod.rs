@@ -27,19 +27,28 @@ pub async fn run(cli: Cli) -> i32 {
         Commands::Daemon => EXIT_OK, // 由 main 处理，不会走到这里
         Commands::Kill => kill().await,
         Commands::Start(args) => {
-            let req = Request::Start(Box::new(args.into_options()));
-            match one_shot(req).await {
-                Ok(Response::ProcessDetail(info)) => {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
-                    } else {
-                        let msg = format!("已启动 [{}] {}", info.id, info.name);
-                        println!("{}", if color { msg.green().to_string() } else { msg });
+            let opts = args.into_options();
+            let wait = opts.wait_ready;
+            let req = Request::Start(Box::new(opts));
+            if wait {
+                start_wait(req, json, color).await
+            } else {
+                match one_shot(req).await {
+                    Ok(Response::ProcessDetail(info)) => {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&info).unwrap_or_default()
+                            );
+                        } else {
+                            let msg = format!("已启动 [{}] {}", info.id, info.name);
+                            println!("{}", if color { msg.green().to_string() } else { msg });
+                        }
+                        EXIT_OK
                     }
-                    EXIT_OK
+                    Ok(resp) => print_simple(resp, color),
+                    Err(code) => code,
                 }
-                Ok(resp) => print_simple(resp, color),
-                Err(code) => code,
             }
         }
         Commands::List => match one_shot(Request::List).await {
@@ -106,6 +115,61 @@ async fn one_shot(req: Request) -> Result<Response, i32> {
         Err(e) => {
             eprintln!("{e}");
             Err(EXIT_ERR)
+        }
+    }
+}
+
+/// `start --wait-ready`：流式接收 Progress / Ready / Error。
+async fn start_wait(req: Request, json: bool, color: bool) -> i32 {
+    if let Err(e) = daemon_launcher::ensure_daemon().await {
+        eprintln!("{e}");
+        return EXIT_DAEMON_UNREACHABLE;
+    }
+    let mut client = match Client::connect().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return EXIT_DAEMON_UNREACHABLE;
+        }
+    };
+    if let Err(e) = client.send(&req).await {
+        eprintln!("{e}");
+        return EXIT_ERR;
+    }
+    use std::io::Write;
+    loop {
+        match client.recv().await {
+            Ok(Some(Response::Progress(msg))) => {
+                if !json {
+                    print!("{msg}");
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            Ok(Some(Response::Ready(info))) => {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
+                } else {
+                    let msg = format!("\n已就绪 [{}] {}", info.id, info.name);
+                    println!("{}", if color { msg.green().to_string() } else { msg });
+                }
+                return EXIT_OK;
+            }
+            Ok(Some(Response::ProcessDetail(info))) => {
+                if !json {
+                    println!("已启动 [{}] {}", info.id, info.name);
+                }
+                return EXIT_OK;
+            }
+            Ok(Some(Response::Error(e))) => {
+                eprintln!("\n{}", if color { e.red().to_string() } else { e.clone() });
+                return EXIT_ERR;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return EXIT_OK,
+            Err(e) => {
+                eprintln!("{e}");
+                return EXIT_ERR;
+            }
         }
     }
 }

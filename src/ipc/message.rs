@@ -74,6 +74,10 @@ pub enum Response {
     ProcessDetail(ProcessInfo),
     LogLines(Vec<String>),
     LogChunk(Vec<String>),
+    /// --wait-ready 等待期间的进度推送。
+    Progress(String),
+    /// --wait-ready 判定就绪。
+    Ready(ProcessInfo),
     StreamEnd,
     VersionMismatch { daemon_version: u32 },
     Error(String),

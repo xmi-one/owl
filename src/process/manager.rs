@@ -6,9 +6,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::common::errors::{OwlError, Result};
 use crate::common::paths;
@@ -17,14 +18,18 @@ use crate::common::sysprobe;
 use crate::log::process_log;
 use crate::ipc::message::StartOptions;
 use crate::process::entry::{
-    HealthState, PersistedApp, ProcessInfo, ProcessStatus, RestartStrategy,
+    HealthCheckConfig, HealthState, PersistedApp, ProcessInfo, ProcessStatus, RestartStrategy,
 };
+use crate::process::health;
+use crate::process::monitor::Monitor;
 
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 const BASE_DELAY: Duration = Duration::from_secs(1);
 const MAX_DELAY: Duration = Duration::from_secs(16);
 const MIN_UPTIME: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// 后台监控 tick 间隔（懒监控，见 9.3）。
+const MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 子进程环境白名单（env_clear 后按需注入，保证可复现）。
 const ENV_WHITELIST: &[&str] = &[
@@ -50,6 +55,13 @@ struct App {
     consecutive_crashes: u32,
     intent: Intent,
     reattached: bool,
+    cpu_percent: f32,
+    memory_bytes: u64,
+    health: HealthState,
+    health_failures: u32,
+    health_cancel: Option<Arc<Notify>>,
+    /// 每次 spawn 递增，用于忽略重启前旧健康任务的过期结果。
+    generation: u64,
 }
 
 impl App {
@@ -64,7 +76,22 @@ impl App {
             consecutive_crashes: 0,
             intent: Intent::None,
             reattached: false,
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            health: HealthState::Unknown,
+            health_failures: 0,
+            health_cancel: None,
+            generation: 0,
         }
+    }
+
+    /// 取消健康检查任务并清状态。
+    fn cancel_health(&mut self) {
+        if let Some(n) = self.health_cancel.take() {
+            n.notify_waiters();
+        }
+        self.health = HealthState::Unknown;
+        self.health_failures = 0;
     }
 
     fn to_info(&self) -> ProcessInfo {
@@ -79,13 +106,13 @@ impl App {
             args: self.cfg.args.clone(),
             pid: self.pid,
             status: self.status,
-            health: HealthState::Unknown,
+            health: self.health,
             port: self.cfg.port,
             restarts: self.restarts,
             max_restarts: self.cfg.max_restarts,
             uptime_secs,
-            cpu_percent: 0.0,
-            memory_bytes: 0,
+            cpu_percent: self.cpu_percent,
+            memory_bytes: self.memory_bytes,
             max_memory: self.cfg.max_memory,
             created_at: self.cfg.created_at,
             restart_strategy: self.cfg.restart_strategy,
@@ -108,6 +135,8 @@ pub enum Cmd {
     Exited { id: u32, success: bool },
     EscalateKill { id: u32 },
     RestartNow { id: u32 },
+    HealthResult { id: u32, generation: u64, healthy: bool },
+    Tick,
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -195,6 +224,18 @@ pub fn start_manager() -> ManagerHandle {
     let (tx, rx) = mpsc::unbounded_channel();
     let mut mgr = Manager::new(tx.clone(), rx);
     mgr.recover();
+    // 后台监控 ticker：统一一个定时器，懒触发（见 9.3）。
+    let tick_tx = tx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(MONITOR_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if tick_tx.send(Cmd::Tick).is_err() {
+                break;
+            }
+        }
+    });
     tokio::spawn(mgr.run());
     ManagerHandle { tx }
 }
@@ -204,6 +245,7 @@ struct Manager {
     next_id: u32,
     tx: mpsc::UnboundedSender<Cmd>,
     rx: mpsc::UnboundedReceiver<Cmd>,
+    monitor: Monitor,
 }
 
 impl Manager {
@@ -213,6 +255,7 @@ impl Manager {
             next_id: 0,
             tx,
             rx,
+            monitor: Monitor::new(),
         }
     }
 
@@ -261,6 +304,7 @@ impl Manager {
                         reply.send(self.handle_batch(&target, "delete", |m, id| m.delete_one(id)));
                 }
                 Cmd::List(reply) => {
+                    // 读取后台 tick 采样值（规整间隔保证 CPU% 准确）。
                     let mut list: Vec<ProcessInfo> =
                         self.apps.values().map(|a| a.to_info()).collect();
                     list.sort_by_key(|i| i.id);
@@ -278,6 +322,12 @@ impl Manager {
                 Cmd::Reset(target, reply) => {
                     let _ = reply.send(self.handle_batch(&target, "reset", |m, id| m.reset_one(id)));
                 }
+                Cmd::Tick => self.handle_tick(),
+                Cmd::HealthResult {
+                    id,
+                    generation,
+                    healthy,
+                } => self.handle_health(id, generation, healthy),
                 Cmd::Exited { id, success } => self.handle_exited(id, success),
                 Cmd::EscalateKill { id } => self.handle_escalate(id),
                 Cmd::RestartNow { id } => {
@@ -302,6 +352,7 @@ impl Manager {
         if self.apps.values().any(|a| a.cfg.name == name) {
             return Err(OwlError::AlreadyExists(name));
         }
+        let port = parse_single_port(opts.port.as_deref())?;
         let id = self.next_id;
         self.next_id += 1;
         let cfg = PersistedApp {
@@ -311,7 +362,7 @@ impl Manager {
             args: opts.args,
             cwd: opts.cwd,
             env: opts.env,
-            port: None,
+            port,
             max_memory: opts.max_memory,
             max_restarts: opts.max_restarts,
             restart_strategy: opts.restart_strategy,
@@ -328,6 +379,8 @@ impl Manager {
         let info = app.to_info();
         self.apps.insert(id, app);
         self.persist();
+        // 立即采一次（建立 CPU 基线 + 尽快展示内存）。
+        let _ = self.tx.send(Cmd::Tick);
         Ok(info)
     }
 
@@ -363,6 +416,7 @@ impl Manager {
                 Ok(())
             }
             Some(pid) => {
+                app.cancel_health();
                 app.intent = Intent::Stop;
                 app.status = ProcessStatus::Stopping;
                 let sig = sysprobe::parse_signal(app.cfg.kill_signal.as_deref());
@@ -377,6 +431,7 @@ impl Manager {
         let app = self.apps.get_mut(&id).ok_or_else(not_found)?;
         match app.pid {
             Some(pid) => {
+                app.cancel_health();
                 app.intent = Intent::Restart;
                 app.status = ProcessStatus::Stopping;
                 let sig = sysprobe::parse_signal(app.cfg.kill_signal.as_deref());
@@ -392,6 +447,7 @@ impl Manager {
         let app = self.apps.get_mut(&id).ok_or_else(not_found)?;
         match app.pid {
             Some(pid) => {
+                app.cancel_health();
                 app.intent = Intent::Delete;
                 app.status = ProcessStatus::Stopping;
                 let sig = sysprobe::parse_signal(app.cfg.kill_signal.as_deref());
@@ -403,6 +459,42 @@ impl Manager {
                 self.apps.remove(&id);
                 Ok(())
             }
+        }
+    }
+
+    fn handle_health(&mut self, id: u32, generation: u64, healthy: bool) {
+        let restart = {
+            let app = match self.apps.get_mut(&id) {
+                Some(a) => a,
+                None => return,
+            };
+            if app.generation != generation || app.status != ProcessStatus::Online {
+                return; // 过期结果或进程已非在线
+            }
+            if healthy {
+                app.health = HealthState::Healthy;
+                app.health_failures = 0;
+                false
+            } else {
+                app.health = HealthState::Unhealthy;
+                app.health_failures += 1;
+                let max = app
+                    .cfg
+                    .health_check
+                    .as_ref()
+                    .map(|h| h.max_failures)
+                    .unwrap_or(3);
+                if app.health_failures >= max {
+                    app.health_failures = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if restart {
+            owl_logger::warn!("进程 [{id}] 健康检查连续失败超阈值，触发重启");
+            let _ = self.restart_one(id);
         }
     }
 
@@ -472,6 +564,9 @@ impl Manager {
             app.pid = None;
             app.start_instant = None;
             app.reattached = false;
+            app.cpu_percent = 0.0;
+            app.memory_bytes = 0;
+            app.cancel_health();
 
             match app.intent {
                 Intent::Delete => Next::Remove,
@@ -529,6 +624,45 @@ impl Manager {
             }
         }
         self.persist();
+    }
+
+    /// 后台监控 tick：以规整间隔采样**所有在线进程**（保证 CPU% 差值口径一致），
+    /// 写回 cpu/内存，并对配了 `max_memory` 的进程做阈值检查（超限重启）。
+    /// 无在线进程时不采样 → 空闲近零开销。
+    fn handle_tick(&mut self) {
+        let pids: Vec<u32> = self
+            .apps
+            .values()
+            .filter(|a| a.status == ProcessStatus::Online)
+            .filter_map(|a| a.pid)
+            .collect();
+        if pids.is_empty() {
+            return;
+        }
+        let samples = self.monitor.sample(&pids);
+        let mut oom_ids = Vec::new();
+        let mut has_limit = false;
+        for app in self.apps.values_mut() {
+            if let Some(pid) = app.pid {
+                if let Some(s) = samples.get(&pid) {
+                    app.cpu_percent = s.cpu_percent;
+                    app.memory_bytes = s.memory_bytes;
+                    if let Some(limit) = app.cfg.max_memory {
+                        has_limit = true;
+                        if s.memory_bytes > limit {
+                            oom_ids.push((app.cfg.id, app.cfg.name.clone(), s.memory_bytes, limit));
+                        }
+                    }
+                }
+            }
+        }
+        for (id, name, used, limit) in oom_ids {
+            owl_logger::warn!("进程 [{id}] {name} 内存超限 ({used} > {limit} bytes)，触发重启");
+            let _ = self.restart_one(id);
+        }
+        if has_limit {
+            self.persist();
+        }
     }
 
     fn handle_escalate(&mut self, id: u32) {
@@ -621,6 +755,9 @@ fn spawn_proc(tx: &mpsc::UnboundedSender<Cmd>, app: &mut App) -> Result<()> {
     }
     std_cmd.env("OWL_INSTANCE_ID", "0");
     std_cmd.env("NODE_APP_INSTANCE", "0");
+    if let Some(port) = app.cfg.port {
+        std_cmd.env("PORT", port.to_string());
+    }
     if let Some(cwd) = &app.cfg.cwd {
         if !std::path::Path::new(cwd).is_dir() {
             return Err(OwlError::Invalid(format!("cwd 不存在: {cwd}")));
@@ -676,7 +813,68 @@ fn spawn_proc(tx: &mpsc::UnboundedSender<Cmd>, app: &mut App) -> Result<()> {
     app.intent = Intent::None;
     app.cfg.last_pid = Some(pid);
     app.cfg.last_pid_start_time = app.start_time;
+    app.generation += 1;
+    app.health = HealthState::Unknown;
+    app.health_failures = 0;
+
+    // 健康检查任务（若已配置）。
+    if let Some(hc) = app.cfg.health_check.clone() {
+        let cancel = Arc::new(Notify::new());
+        app.health_cancel = Some(cancel.clone());
+        spawn_health(tx, app.cfg.id, app.generation, hc, app.cfg.port, cancel);
+    }
     Ok(())
+}
+
+/// 周期健康探针任务；通过 `cancel` Notify 优雅停止。
+fn spawn_health(
+    tx: &mpsc::UnboundedSender<Cmd>,
+    id: u32,
+    generation: u64,
+    cfg: HealthCheckConfig,
+    port: Option<u16>,
+    cancel: Arc<Notify>,
+) {
+    let tx = tx.clone();
+    let interval = Duration::from_secs(cfg.interval_secs.max(1));
+    let timeout = Duration::from_secs(cfg.timeout_secs.max(1));
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = cancel.notified() => break,
+            }
+            let healthy = match health::probe(&cfg, port).await {
+                Some(h) => h,
+                None => match port {
+                    Some(p) => health::tcp_probe("127.0.0.1", p, timeout).await,
+                    None => true,
+                },
+            };
+            if tx
+                .send(Cmd::HealthResult {
+                    id,
+                    generation,
+                    healthy,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+}
+
+/// 解析单个端口（范围 / `auto:` 属多实例特性，见 7.9，后续增量支持）。
+fn parse_single_port(s: Option<&str>) -> Result<Option<u16>> {
+    match s {
+        None => Ok(None),
+        Some(s) => s
+            .trim()
+            .parse::<u16>()
+            .map(Some)
+            .map_err(|_| OwlError::Invalid(format!("暂仅支持单个数字端口: {s}"))),
+    }
 }
 
 /// 轮询探测重接管进程的存活，消失则上报 Exited。

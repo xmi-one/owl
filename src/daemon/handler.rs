@@ -22,11 +22,21 @@ where
 {
     match req {
         Request::Start(opts) => {
-            let resp = match mgr.start(*opts).await {
-                Ok(info) => Response::ProcessDetail(info),
-                Err(e) => Response::Error(e.to_string()),
-            };
-            write_frame(writer, &resp).await?;
+            let wait = opts.wait_ready;
+            let timeout = opts.ready_timeout_secs.unwrap_or(30);
+            let hc = opts.health_check.clone();
+            match mgr.start(*opts).await {
+                Ok(info) => {
+                    if wait {
+                        wait_ready(mgr, info, hc, timeout, writer).await?;
+                    } else {
+                        write_frame(writer, &Response::ProcessDetail(info)).await?;
+                    }
+                }
+                Err(e) => {
+                    write_frame(writer, &Response::Error(e.to_string())).await?;
+                }
+            }
             Ok(false)
         }
         Request::Stop { target } => reply_result(writer, mgr.stop(target).await).await,
@@ -136,6 +146,73 @@ where
         }
     }
     Ok(())
+}
+
+/// 等待进程就绪并流式回报（见 7.14）。就绪优先级：health_check > TCP port > 最小存活时长。
+async fn wait_ready<W>(
+    mgr: &ManagerHandle,
+    info: crate::process::entry::ProcessInfo,
+    hc: Option<crate::process::entry::HealthCheckConfig>,
+    timeout_secs: u64,
+    writer: &mut W,
+) -> Result<(), OwlError>
+where
+    W: AsyncWrite + Unpin,
+{
+    use crate::process::entry::ProcessStatus;
+    use crate::process::health;
+    use std::time::{Duration, Instant};
+
+    let id = info.id;
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    let probe_timeout = Duration::from_secs(2);
+
+    write_frame(writer, &Response::Progress(format!("等待 [{id}] {} 就绪…", info.name))).await?;
+
+    loop {
+        if Instant::now() >= deadline {
+            write_frame(
+                writer,
+                &Response::Error(format!("等待就绪超时（{timeout_secs}s）")),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        match mgr.info(id.to_string()).await {
+            Ok(ci) => match ci.status {
+                ProcessStatus::Online => {
+                    let ready = if let Some(hc) = &hc {
+                        health::probe(hc, ci.port).await.unwrap_or(false)
+                    } else if let Some(port) = ci.port {
+                        health::tcp_probe("127.0.0.1", port, probe_timeout).await
+                    } else {
+                        ci.uptime_secs >= 1
+                    };
+                    if ready {
+                        write_frame(writer, &Response::Ready(ci)).await?;
+                        return Ok(());
+                    }
+                }
+                ProcessStatus::Errored | ProcessStatus::Stopped => {
+                    write_frame(
+                        writer,
+                        &Response::Error("进程在就绪前已退出".into()),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                _ => {}
+            },
+            Err(_) => {
+                write_frame(writer, &Response::Error("进程不存在".into())).await?;
+                return Ok(());
+            }
+        }
+
+        write_frame(writer, &Response::Progress(".".into())).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// 返回文件中字节偏移 `offset` 之后的完整行。

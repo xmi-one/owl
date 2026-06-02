@@ -3,7 +3,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::ipc::message::StartOptions;
-use crate::process::entry::RestartStrategy;
+use crate::process::entry::{HealthCheckConfig, RestartStrategy};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -26,6 +26,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)] // StartArgs 为 CLI 解析结构，仅单实例，size 无关紧要
 pub enum Commands {
     /// 启动进程：owl start [选项] -- <命令> [参数...]（直接 exec，不经 shell）
     Start(StartArgs),
@@ -106,6 +107,34 @@ pub struct StartArgs {
     #[arg(long = "kill-signal")]
     pub kill_signal: Option<String>,
 
+    /// HTTP 健康检查 URL（支持 {port} 占位符，仅 http://）
+    #[arg(long = "health-url")]
+    pub health_url: Option<String>,
+
+    /// 脚本健康检查（退出码 0 为健康）
+    #[arg(long = "health-script")]
+    pub health_script: Option<String>,
+
+    /// 健康检查间隔（秒）
+    #[arg(long = "health-interval", default_value_t = 30)]
+    pub health_interval: u64,
+
+    /// 健康检查超时（秒）
+    #[arg(long = "health-timeout", default_value_t = 5)]
+    pub health_timeout: u64,
+
+    /// 连续失败多少次判定不健康并重启
+    #[arg(long = "health-retries", default_value_t = 3)]
+    pub health_retries: u32,
+
+    /// 阻塞等待进程就绪后再返回（见 7.14）
+    #[arg(long = "wait-ready")]
+    pub wait_ready: bool,
+
+    /// --wait-ready 的超时（秒）
+    #[arg(long = "ready-timeout", default_value_t = 30)]
+    pub ready_timeout: u64,
+
     /// 命令与参数（位于 `--` 之后）
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true, num_args = 1..)]
     pub cmd: Vec<String>,
@@ -116,6 +145,17 @@ impl StartArgs {
         let mut iter = self.cmd.into_iter();
         let command = iter.next().unwrap_or_default();
         let args: Vec<String> = iter.collect();
+        let health_check = if self.health_url.is_some() || self.health_script.is_some() {
+            Some(HealthCheckConfig {
+                url: self.health_url,
+                script: self.health_script,
+                interval_secs: self.health_interval.max(1),
+                timeout_secs: self.health_timeout.max(1),
+                max_failures: self.health_retries.max(1),
+            })
+        } else {
+            None
+        };
         StartOptions {
             name: self.name,
             command,
@@ -129,9 +169,9 @@ impl StartArgs {
             restart_delay_ms: self.restart_delay,
             restart_strategy: self.restart_strategy,
             kill_signal: self.kill_signal,
-            health_check: None,
-            wait_ready: false,
-            ready_timeout_secs: None,
+            health_check,
+            wait_ready: self.wait_ready,
+            ready_timeout_secs: Some(self.ready_timeout),
         }
     }
 }
