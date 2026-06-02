@@ -117,6 +117,7 @@ pub async fn run(cli: Cli) -> i32 {
         Commands::Reload { target } => {
             reload_stream(target, color).await
         }
+        Commands::Monit { interval, count } => monit(interval, count, json, color).await,
         Commands::Save { file } => {
             simple(Request::Save { file }, color).await
         }
@@ -362,6 +363,47 @@ async fn logs(target: String, lines: usize, follow: bool, color: bool) -> i32 {
                 return EXIT_ERR;
             }
         }
+    }
+}
+
+async fn monit(interval_secs: u64, count: Option<u32>, json: bool, color: bool) -> i32 {
+    let sleep = std::time::Duration::from_secs(interval_secs.max(1));
+    let mut n = 0u32;
+    loop {
+        match one_shot(Request::List).await {
+            Ok(Response::ProcessList(list)) => {
+                // 清屏并回到左上角（ANSI）
+                if !json {
+                    print!("\x1b[2J\x1b[H");
+                    println!("owl monit  刷新间隔: {}s  (Ctrl+C 退出)", sleep.as_secs());
+                    println!("{}", output::render_list(&list, color));
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "timestamp": chrono::Utc::now().timestamp(),
+                            "data": list
+                        }))
+                        .unwrap_or_default()
+                    );
+                }
+            }
+            Ok(resp) => {
+                let code = print_simple(resp, color);
+                if code != EXIT_OK {
+                    return code;
+                }
+            }
+            Err(code) => return code,
+        }
+
+        n += 1;
+        if let Some(c) = count {
+            if n >= c {
+                return EXIT_OK;
+            }
+        }
+        tokio::time::sleep(sleep).await;
     }
 }
 

@@ -60,6 +60,15 @@ pub enum Commands {
     Scale { target: String, n: u32 },
     /// 无停机滚动重启（逐实例：重启→就绪→下一个）
     Reload { target: String },
+    /// 实时监控进程状态（轻量版）
+    Monit {
+        /// 刷新间隔（秒）
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+        /// 刷新次数（不传则持续运行）
+        #[arg(long)]
+        count: Option<u32>,
+    },
     /// 保存当前进程拓扑快照（用于开机恢复）
     Save {
         /// 快照文件路径（默认 $OWL_HOME/saved.json）
