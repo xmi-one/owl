@@ -66,7 +66,7 @@ fn colorize_status(status: ProcessStatus, color: bool) -> String {
 }
 
 /// 渲染进程列表为表格。
-pub fn render_list(list: &[ProcessInfo], color: bool) -> String {
+pub fn render_list(list: &[ProcessInfo], _color: bool) -> String {
     if list.is_empty() {
         return "（无进程）".to_string();
     }
@@ -75,7 +75,9 @@ pub fn render_list(list: &[ProcessInfo], color: bool) -> String {
         .map(|p| Row {
             id: p.id,
             name: p.name.clone(),
-            status: colorize_status(p.status, color),
+            // `tabled` 在不同终端对 ANSI 宽度处理不一致，可能导致列错位；
+            // 列表表格统一使用无颜色文本，保证对齐稳定。
+            status: colorize_status(p.status, false),
             pid: p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
             restarts: p.restarts,
             uptime: human_duration(p.uptime_secs),
@@ -89,7 +91,7 @@ pub fn render_list(list: &[ProcessInfo], color: bool) -> String {
             } else {
                 human_size(p.memory_bytes)
             },
-            health: health_label(p.health, color),
+            health: health_label(p.health, false),
         })
         .collect();
     Table::new(rows).with(Style::rounded()).to_string()

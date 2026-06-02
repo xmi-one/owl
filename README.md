@@ -17,6 +17,9 @@ cargo build --release
 # 启动进程（直接 exec，不经 shell；命令写在 -- 之后）
 owl start --name web -- node server.js
 owl start --name api --restart-strategy always -- ./api-server --port 8080
+# 拉起已存在（已停止）进程（兼容 PM2 使用习惯）
+owl start web
+owl start 4
 
 # 查看 / 详情
 owl list                 # 别名：ls / ps
@@ -46,7 +49,7 @@ owl kill
 | 选项 | 说明 |
 | --- | --- |
 | `--name <NAME>` | 进程名（缺省由命令派生） |
-| `--cwd <DIR>` | 工作目录 |
+| `--cwd <DIR>` | 工作目录（默认：执行 `owl start` 时的当前目录） |
 | `--env KEY=VALUE` | 注入环境变量（可重复） |
 | `--restart-strategy <always\|on-failure\|never>` | 重启策略（默认 `on-failure`） |
 | `--max-restarts <N>` | 窗口内最大连续崩溃次数，超过则 `errored` |

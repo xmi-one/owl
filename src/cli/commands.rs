@@ -219,6 +219,11 @@ pub struct StartArgs {
 
 impl StartArgs {
     pub fn into_options(self) -> StartOptions {
+        let cwd = self.cwd.or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        });
         let mut iter = self.cmd.into_iter();
         let command = iter.next().unwrap_or_default();
         let args: Vec<String> = iter.collect();
@@ -237,7 +242,7 @@ impl StartArgs {
             name: self.name,
             command,
             args,
-            cwd: self.cwd,
+            cwd,
             env: self.env.into_iter().collect(),
             instances: self.instances.max(1),
             port: self.port,

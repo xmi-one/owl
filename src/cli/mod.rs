@@ -23,9 +23,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, TableState};
 
 use crate::common::paths;
 use crate::ipc::message::{Request, Response};
-use crate::process::entry::ProcessInfo;
+use crate::process::entry::{ProcessInfo, RestartStrategy};
 use client::Client;
-use commands::{Cli, Commands, CompletionShell, ServiceCommands, ServiceTarget};
+use commands::{Cli, Commands, CompletionShell, ServiceCommands, ServiceTarget, StartArgs};
 
 /// CLI 退出码约定（见方案 7.16）。
 const EXIT_OK: i32 = 0;
@@ -42,6 +42,9 @@ pub async fn run(cli: Cli) -> i32 {
         Commands::Daemon => EXIT_OK, // 由 main 处理，不会走到这里
         Commands::Kill => kill().await,
         Commands::Start(args) => {
+            if let Some(target) = start_existing_shorthand(&args) {
+                return simple(Request::Restart { target }, color).await;
+            }
             let opts = args.into_options();
             let wait = opts.wait_ready;
             let req = Request::Start(Box::new(opts));
@@ -163,6 +166,36 @@ pub async fn run(cli: Cli) -> i32 {
             }
         },
     }
+}
+
+/// 兼容 `owl start <id|name>`：若仅提供单个 token 且未携带其它启动选项，
+/// 将其视为“拉起已存在（通常是 stopped）的进程”。
+fn start_existing_shorthand(args: &StartArgs) -> Option<String> {
+    if args.name.is_some()
+        || args.cwd.is_some()
+        || !args.env.is_empty()
+        || args.instances != 1
+        || args.port.is_some()
+        || args.max_memory.is_some()
+        || args.max_restarts.is_some()
+        || args.restart_delay.is_some()
+        || args.restart_strategy != RestartStrategy::OnFailure
+        || args.kill_signal.is_some()
+        || args.health_url.is_some()
+        || args.health_script.is_some()
+        || args.wait_ready
+        || args.ready_timeout != 30
+    {
+        return None;
+    }
+    if args.cmd.len() != 1 {
+        return None;
+    }
+    let token = args.cmd[0].trim();
+    if token.is_empty() || token.contains('/') || token.contains(std::path::MAIN_SEPARATOR) {
+        return None;
+    }
+    Some(token.to_string())
 }
 
 /// 确保 Daemon 运行 + 连接 + 发送 + 取首个响应。
