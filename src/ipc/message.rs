@@ -63,6 +63,8 @@ pub enum Request {
     Flush { target: String },
     Reset { target: String },
     Apply { apps: Vec<StartOptions>, prune: bool, dry_run: bool },
+    Scale { target: String, n: u32 },
+    Reload { target: String },
     SetLogLevel { level: String },
     Kill,
 }

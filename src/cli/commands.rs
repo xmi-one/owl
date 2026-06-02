@@ -1,6 +1,6 @@
 //! CLI 子命令定义 (clap derive)。
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::ipc::message::StartOptions;
 use crate::process::entry::{HealthCheckConfig, RestartStrategy};
@@ -56,6 +56,15 @@ pub enum Commands {
     Flush { target: String },
     /// 清零重启计数
     Reset { target: String },
+    /// 调整进程组实例数：owl scale <name> <n>
+    Scale { target: String, n: u32 },
+    /// 无停机滚动重启（逐实例：重启→就绪→下一个）
+    Reload { target: String },
+    /// 生成 shell 补全脚本
+    Completions {
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
     /// 按 owl.toml 声明式收敛（幂等；默认保留未列出的进程）
     Apply {
         /// 配置文件路径
@@ -75,6 +84,15 @@ pub enum Commands {
     /// [内部] 以 Daemon 模式运行
     #[command(hide = true)]
     Daemon,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Elvish,
+    Powershell,
 }
 
 #[derive(clap::Args, Debug)]

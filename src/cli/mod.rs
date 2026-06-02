@@ -6,11 +6,13 @@ pub mod daemon_launcher;
 pub mod output;
 
 use colored::Colorize;
+use clap::CommandFactory;
+use clap_complete::{generate, shells};
 
 use crate::common::paths;
 use crate::ipc::message::{Request, Response};
 use client::Client;
-use commands::{Cli, Commands};
+use commands::{Cli, Commands, CompletionShell};
 
 /// CLI 退出码约定（见方案 7.16）。
 const EXIT_OK: i32 = 0;
@@ -108,6 +110,16 @@ pub async fn run(cli: Cli) -> i32 {
             lines,
             follow,
         } => logs(target, lines, follow, color).await,
+        Commands::Scale { target, n } => {
+            simple(Request::Scale { target, n }, color).await
+        }
+        Commands::Reload { target } => {
+            reload_stream(target, color).await
+        }
+        Commands::Completions { shell } => {
+            output_completions(shell);
+            EXIT_OK
+        }
     }
 }
 
@@ -217,9 +229,66 @@ fn print_simple(resp: Response, color: bool) -> i32 {
                 EXIT_ERR
             }
         }
+        Response::Progress(msg) => {
+            print!("{msg}");
+            EXIT_OK
+        }
         other => {
             println!("{other:?}");
             EXIT_OK
+        }
+    }
+}
+
+fn output_completions(shell: CompletionShell) {
+    let mut cmd = Cli::command();
+    match shell {
+        CompletionShell::Bash => generate(shells::Bash, &mut cmd, "owl", &mut std::io::stdout()),
+        CompletionShell::Zsh => generate(shells::Zsh, &mut cmd, "owl", &mut std::io::stdout()),
+        CompletionShell::Fish => generate(shells::Fish, &mut cmd, "owl", &mut std::io::stdout()),
+        CompletionShell::Elvish => {
+            generate(shells::Elvish, &mut cmd, "owl", &mut std::io::stdout())
+        }
+        CompletionShell::Powershell => {
+            generate(shells::PowerShell, &mut cmd, "owl", &mut std::io::stdout())
+        }
+    }
+}
+
+async fn reload_stream(target: String, color: bool) -> i32 {
+    if let Err(e) = daemon_launcher::ensure_daemon().await {
+        eprintln!("{e}");
+        return EXIT_DAEMON_UNREACHABLE;
+    }
+    let mut client = match Client::connect().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return EXIT_DAEMON_UNREACHABLE;
+        }
+    };
+    if let Err(e) = client.send(&Request::Reload { target }).await {
+        eprintln!("{e}");
+        return EXIT_ERR;
+    }
+    loop {
+        match client.recv().await {
+            Ok(Some(Response::Progress(msg))) => print!("{msg}"),
+            Ok(Some(Response::Ok(msg))) => {
+                println!();
+                println!("{}", if color { msg.green().to_string() } else { msg });
+                return EXIT_OK;
+            }
+            Ok(Some(Response::Error(e))) => {
+                eprintln!("{}", if color { e.red().to_string() } else { e });
+                return EXIT_ERR;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return EXIT_OK,
+            Err(e) => {
+                eprintln!("{e}");
+                return EXIT_ERR;
+            }
         }
     }
 }

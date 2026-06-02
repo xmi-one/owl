@@ -2,7 +2,7 @@
 
 高性能、语言无关的进程管理器（Rust 版 PM2）。Client-Daemon 架构，通过 Unix Domain Socket 通信，子进程在 Daemon 崩溃后仍可存活并被新 Daemon 重接管。
 
-> 当前为 **Phase 1 (MVP)**：核心生命周期已可用，多实例 / 资源监控 / 健康探针 / `owl.toml` / HTTP API 等为后续阶段（见 `implementation_plan.md`）。
+> 当前已覆盖 **Phase 1 + Phase 2 核心能力**：核心生命周期、多实例、资源监控、健康探针、`owl.toml`+`apply`、`scale`、`reload`、`--wait-ready`。
 
 ## 构建
 
@@ -32,6 +32,8 @@ owl stop all
 owl delete web           # 别名：rm
 owl reset web            # 清零重启计数
 owl flush web            # 清空该进程日志
+owl scale web 4          # 调整实例数
+owl reload web           # 无停机滚动重启（逐实例）
 
 # 终止 Daemon（在线子进程会脱离存活）
 owl kill
@@ -50,8 +52,56 @@ owl kill
 | `--max-restarts <N>` | 窗口内最大连续崩溃次数，超过则 `errored` |
 | `--restart-delay <MS>` | 固定重启间隔（设置后禁用指数退避） |
 | `--kill-signal <SIG>` | 停止信号（默认 `SIGTERM`） |
+| `--instances <N>` | 多实例启动（同名进程组） |
+| `--port <P\|auto:START-END>` | 端口基准；实例 i 使用 `START+i` |
+| `--health-url <URL>` | 健康探针 URL（支持 `{port}`） |
+| `--health-script <CMD>` | 脚本健康探针（exit 0=健康） |
+| `--wait-ready` | 启动后阻塞直到就绪 |
+| `--ready-timeout <SEC>` | 就绪等待超时 |
 
 全局：`--json`（机器可读输出）、`--no-color`。
+
+## 多实例 / scale / reload
+
+```bash
+# 启动 3 实例，自动分配端口 5000/5001/5002
+owl start --name web --instances 3 --port auto:5000-5100 -- node server.js
+
+# 扩到 5 实例（新增实例按 instance_index 顺延）
+owl scale web 5
+
+# 缩到 2 实例（优先移除最大 instance_index）
+owl scale web 2
+
+# 无停机滚动重启：逐实例 restart -> wait-ready -> 下一实例
+owl reload web
+```
+
+## 声明式配置与 apply
+
+```bash
+# 预览变更
+owl apply owl.toml --dry-run
+
+# 执行收敛（默认保留配置外进程）
+owl apply owl.toml
+
+# 同时删除配置外进程
+owl apply owl.toml --prune
+```
+
+## 日志说明
+
+- 默认每进程写入 `~/.owl/logs/<name>-<id>.log`（合并 stdout/stderr，stderr 带 `[err]` 前缀）。
+- 支持按大小轮转：超阈值后滚动为 `.1` 到 `.5` 备份文件。
+
+## Shell 补全
+
+```bash
+owl completions bash > /etc/bash_completion.d/owl
+owl completions zsh > ~/.zfunc/_owl
+owl completions fish > ~/.config/fish/completions/owl.fish
+```
 
 ## 设计要点
 

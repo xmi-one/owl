@@ -102,6 +102,7 @@ impl App {
         ProcessInfo {
             id: self.cfg.id,
             name: self.cfg.name.clone(),
+            instance_index: self.cfg.instance_index,
             command: self.cfg.command.clone(),
             args: self.cfg.args.clone(),
             pid: self.pid,
@@ -135,6 +136,11 @@ pub enum Cmd {
         apps: Vec<StartOptions>,
         prune: bool,
         dry_run: bool,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    Scale {
+        target: String,
+        n: u32,
         reply: oneshot::Sender<Result<String>>,
     },
     // 内部事件
@@ -221,6 +227,28 @@ impl ManagerHandle {
             reply: tx,
         })?;
         rx.await.map_err(recv_err)?
+    }
+
+    pub async fn scale(&self, target: String, n: u32) -> Result<String> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Cmd::Scale {
+            target,
+            n,
+            reply: tx,
+        })?;
+        rx.await.map_err(recv_err)?
+    }
+
+    /// 返回某 target（id 或 name）的所有实例 (id, port)，按 instance_index 排序。
+    pub async fn instance_ids(&self, target: String) -> Result<Vec<(u32, Option<u16>)>> {
+        let infos = self.list().await?;
+        let mut group: Vec<(u32, u32, Option<u16>)> = infos
+            .into_iter()
+            .filter(|i| i.name == target || i.id.to_string() == target)
+            .map(|i| (i.instance_index, i.id, i.port))
+            .collect();
+        group.sort_by_key(|(idx, _, _)| *idx);
+        Ok(group.into_iter().map(|(_, id, port)| (id, port)).collect())
     }
 
     pub async fn shutdown(&self) {
@@ -352,6 +380,9 @@ impl Manager {
                 } => {
                     let _ = reply.send(self.handle_apply(apps, prune, dry_run));
                 }
+                Cmd::Scale { target, n, reply } => {
+                    let _ = reply.send(self.handle_scale(&target, n));
+                }
                 Cmd::Tick => self.handle_tick(),
                 Cmd::HealthResult {
                     id,
@@ -382,18 +413,110 @@ impl Manager {
         if self.apps.values().any(|a| a.cfg.name == name) {
             return Err(OwlError::AlreadyExists(name));
         }
-        let id = self.next_id;
-        let cfg = build_cfg(id, chrono::Utc::now().timestamp(), name, &opts)?;
-        self.next_id += 1;
-        let mut app = App::from_cfg(cfg);
+        let count = opts.instances.max(1);
+        let base = parse_port_base(opts.port.as_deref())?;
+        let now = chrono::Utc::now().timestamp();
         let tx = self.tx.clone();
-        spawn_proc(&tx, &mut app)?;
-        let info = app.to_info();
-        self.apps.insert(id, app);
+
+        let mut first_info: Option<ProcessInfo> = None;
+        for i in 0..count {
+            let id = self.next_id;
+            let mut cfg = build_cfg(id, now, name.clone(), &opts)?;
+            cfg.instance_index = i;
+            cfg.port_base = base;
+            cfg.port = base.map(|b| b.saturating_add(i as u16));
+            if let Some(p) = cfg.port {
+                if let Some(holder) = self.port_in_use(p, None) {
+                    return Err(OwlError::Invalid(format!(
+                        "端口 {p} 已被进程 [{holder}] 占用"
+                    )));
+                }
+            }
+            self.next_id += 1;
+            let mut app = App::from_cfg(cfg);
+            spawn_proc(&tx, &mut app)?;
+            if first_info.is_none() {
+                first_info = Some(app.to_info());
+            }
+            self.apps.insert(id, app);
+        }
         self.persist();
-        // 立即采一次（建立 CPU 基线 + 尽快展示内存）。
         let _ = self.tx.send(Cmd::Tick);
-        Ok(info)
+        first_info.ok_or_else(|| OwlError::Other("启动了 0 个实例".into()))
+    }
+
+    /// 某端口是否已被受管进程占用（排除 `exclude` 这个 id）。返回占用者 id。
+    fn port_in_use(&self, port: u16, exclude: Option<u32>) -> Option<u32> {
+        self.apps
+            .values()
+            .find(|a| a.cfg.port == Some(port) && Some(a.cfg.id) != exclude)
+            .map(|a| a.cfg.id)
+    }
+
+    /// 调整进程组实例数（见 7.9）。
+    fn handle_scale(&mut self, target: &str, n: u32) -> Result<String> {
+        // 取该组所有实例（按 instance_index 排序）。
+        let mut group: Vec<(u32, u32)> = self
+            .apps
+            .values()
+            .filter(|a| a.cfg.name == target || a.cfg.id.to_string() == target)
+            .map(|a| (a.cfg.instance_index, a.cfg.id))
+            .collect();
+        if group.is_empty() {
+            return Err(OwlError::NotFound(target.to_string()));
+        }
+        group.sort_unstable();
+        let current = group.len() as u32;
+        if n == current {
+            return Ok(format!("scale: {target} 已是 {n} 实例，无变化"));
+        }
+        if n == 0 {
+            return Err(OwlError::Invalid("实例数需 >= 1（删除请用 delete）".into()));
+        }
+
+        if n > current {
+            let template = self.apps[&group[0].1].cfg.clone();
+            let base = template.port_base;
+            let now = chrono::Utc::now().timestamp();
+            let tx = self.tx.clone();
+            for i in current..n {
+                let id = self.next_id;
+                let mut cfg = template.clone();
+                cfg.id = id;
+                cfg.instance_index = i;
+                cfg.created_at = now;
+                cfg.last_pid = None;
+                cfg.last_pid_start_time = None;
+                cfg.port = base.map(|b| b.saturating_add(i as u16));
+                if let Some(p) = cfg.port {
+                    if let Some(holder) = self.port_in_use(p, None) {
+                        return Err(OwlError::Invalid(format!(
+                            "端口 {p} 已被进程 [{holder}] 占用"
+                        )));
+                    }
+                }
+                self.next_id += 1;
+                let mut app = App::from_cfg(cfg);
+                spawn_proc(&tx, &mut app)?;
+                self.apps.insert(id, app);
+            }
+            self.persist();
+            let _ = self.tx.send(Cmd::Tick);
+            Ok(format!("scale: {target} {current} -> {n}（+{}）", n - current))
+        } else {
+            // 缩容：移除最高 index 的实例。
+            let remove: Vec<u32> = group
+                .iter()
+                .rev()
+                .take((current - n) as usize)
+                .map(|(_, id)| *id)
+                .collect();
+            for id in &remove {
+                let _ = self.delete_one(*id);
+            }
+            self.persist();
+            Ok(format!("scale: {target} {current} -> {n}（-{}）", current - n))
+        }
     }
 
     /// 声明式收敛（见 7.13）。返回人类可读的动作报告。
@@ -860,8 +983,8 @@ fn spawn_proc(tx: &mpsc::UnboundedSender<Cmd>, app: &mut App) -> Result<()> {
     for (k, v) in &app.cfg.env {
         std_cmd.env(k, v);
     }
-    std_cmd.env("OWL_INSTANCE_ID", "0");
-    std_cmd.env("NODE_APP_INSTANCE", "0");
+    std_cmd.env("OWL_INSTANCE_ID", app.cfg.instance_index.to_string());
+    std_cmd.env("NODE_APP_INSTANCE", app.cfg.instance_index.to_string());
     if let Some(port) = app.cfg.port {
         std_cmd.env("PORT", port.to_string());
     }
@@ -978,11 +1101,13 @@ fn build_cfg(id: u32, created_at: i64, name: String, opts: &StartOptions) -> Res
     Ok(PersistedApp {
         id,
         name,
+        instance_index: 0,
         command: opts.command.clone(),
         args: opts.args.clone(),
         cwd: opts.cwd.clone(),
         env: opts.env.clone(),
         port,
+        port_base: port,
         max_memory: opts.max_memory,
         max_restarts: opts.max_restarts,
         restart_strategy: opts.restart_strategy,
@@ -1014,16 +1139,28 @@ fn non_key_differ(a: &PersistedApp, b: &PersistedApp) -> bool {
         || a.health_check != b.health_check
 }
 
-/// 解析单个端口（范围 / `auto:` 属多实例特性，见 7.9，后续增量支持）。
-fn parse_single_port(s: Option<&str>) -> Result<Option<u16>> {
-    match s {
-        None => Ok(None),
-        Some(s) => s
-            .trim()
-            .parse::<u16>()
-            .map(Some)
-            .map_err(|_| OwlError::Invalid(format!("暂仅支持单个数字端口: {s}"))),
+/// 解析端口基准值，支持：
+/// - 单端口 `3000` → base=3000
+/// - 范围/自动 `auto:5000-5100` 或 `5000-5100` → base=5000（实例 i 用 base+i）
+fn parse_port_base(s: Option<&str>) -> Result<Option<u16>> {
+    let s = match s {
+        None => return Ok(None),
+        Some(s) => s.trim(),
+    };
+    if s.is_empty() {
+        return Ok(None);
     }
+    let body = s.strip_prefix("auto:").unwrap_or(s);
+    let start = body.split('-').next().unwrap_or(body).trim();
+    start
+        .parse::<u16>()
+        .map(Some)
+        .map_err(|_| OwlError::Invalid(format!("无法解析端口: {s}")))
+}
+
+/// 解析单个端口（apply/build_cfg 用；范围取起始值）。
+fn parse_single_port(s: Option<&str>) -> Result<Option<u16>> {
+    parse_port_base(s)
 }
 
 /// 轮询探测重接管进程的存活，消失则上报 Exited。

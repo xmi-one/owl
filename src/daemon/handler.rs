@@ -49,6 +49,11 @@ where
             prune,
             dry_run,
         } => reply_result(writer, mgr.apply(apps, prune, dry_run).await).await,
+        Request::Scale { target, n } => reply_result(writer, mgr.scale(target, n).await).await,
+        Request::Reload { target } => {
+            reload_rolling(mgr, &target, writer).await?;
+            Ok(false)
+        }
         Request::List => {
             let resp = match mgr.list().await {
                 Ok(list) => Response::ProcessList(list),
@@ -217,6 +222,124 @@ where
 
         write_frame(writer, &Response::Progress(".".into())).await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// 无停机滚动重启：按实例顺序依次重启 target 进程组中的实例，逐个等待就绪。
+async fn reload_rolling<W>(
+    mgr: &ManagerHandle,
+    target: &str,
+    writer: &mut W,
+) -> Result<(), OwlError>
+where
+    W: AsyncWrite + Unpin,
+{
+    use std::time::Duration;
+
+    // 取实例 id 列表（按 instance_index 排序）。
+    let instances = mgr
+        .instance_ids(target.to_string())
+        .await
+        .map_err(|e| OwlError::Other(e.to_string()))?;
+    if instances.is_empty() {
+        write_frame(
+            writer,
+            &Response::Error(format!("未找到进程组: {target}")),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    write_frame(
+        writer,
+        &Response::Progress(format!("rolling reload {target}…")),
+    )
+    .await?;
+
+    for (id, _port) in instances {
+        // 记录当前信息用于 wait_ready 中的 id/name。
+        let info = mgr
+            .info(id.to_string())
+            .await
+            .map_err(|e| OwlError::Other(e.to_string()))?;
+
+        write_frame(
+            writer,
+            &Response::Progress(format!(
+                "\n- reload [{}] {} (instance #{})",
+                info.id, info.name, info.instance_index
+            )),
+        )
+        .await?;
+
+        // 触发重启。
+        mgr.restart(id.to_string())
+            .await
+            .map_err(|e| OwlError::Other(e.to_string()))?;
+
+        wait_instance_online(mgr, info.id, 60, writer).await?;
+    }
+
+    write_frame(
+        writer,
+        &Response::Ok(format!("reload {target} 完成")),
+    )
+    .await?;
+    // 小睡一会儿让输出 flush。
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    Ok(())
+}
+
+/// reload 专用等待：容忍 Stopping/Stopped/Launching 过渡，仅在超时或 Errored 失败。
+async fn wait_instance_online<W>(
+    mgr: &ManagerHandle,
+    id: u32,
+    timeout_secs: u64,
+    writer: &mut W,
+) -> Result<(), OwlError>
+where
+    W: AsyncWrite + Unpin,
+{
+    use crate::process::entry::ProcessStatus;
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    loop {
+        if Instant::now() >= deadline {
+            write_frame(
+                writer,
+                &Response::Error(format!("reload 等待实例 {id} 就绪超时（{timeout_secs}s）")),
+            )
+            .await?;
+            return Ok(());
+        }
+        match mgr.info(id.to_string()).await {
+            Ok(info) => match info.status {
+                ProcessStatus::Online => {
+                    write_frame(
+                        writer,
+                        &Response::Progress(format!(" -> ok [{}]", id)),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                ProcessStatus::Errored => {
+                    write_frame(
+                        writer,
+                        &Response::Error(format!("实例 {id} 在 reload 期间进入 errored")),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            },
+            Err(e) => {
+                write_frame(writer, &Response::Error(e.to_string())).await?;
+                return Ok(());
+            }
+        }
     }
 }
 

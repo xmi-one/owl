@@ -7,6 +7,8 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 
 /// stderr 行前缀标记，便于 `owl logs` 区分/着色。
 const ERR_TAG: &str = "[err] ";
+const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_BACKUPS: usize = 5;
 
 /// 启动一个采集任务：逐行读取 `reader`，以 O_APPEND 追加到合并日志文件。
 ///
@@ -45,6 +47,7 @@ where
                         owl_logger::warn!("写日志失败({}): {e}", path.display());
                         break;
                     }
+                    rotate_if_needed(&path, &mut file).await;
                 }
                 Ok(None) => break, // EOF：管道关闭
                 Err(e) => {
@@ -55,6 +58,39 @@ where
         }
         let _ = file.flush().await;
     });
+}
+
+async fn rotate_if_needed(path: &Path, file: &mut tokio::fs::File) {
+    let len = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(_) => return,
+    };
+    if len < MAX_LOG_BYTES {
+        return;
+    }
+    let _ = file.flush().await;
+    drop(std::mem::replace(
+        file,
+        match OpenOptions::new().create(true).append(true).open(path).await {
+            Ok(f) => f,
+            Err(_) => return,
+        },
+    ));
+    // backup rollover: .4 -> .5, ... .1 -> .2, current -> .1
+    for i in (1..=MAX_BACKUPS).rev() {
+        let src = if i == 1 {
+            path.to_path_buf()
+        } else {
+            PathBuf::from(format!("{}.{}", path.display(), i - 1))
+        };
+        let dst = PathBuf::from(format!("{}.{}", path.display(), i));
+        if src.exists() {
+            let _ = tokio::fs::rename(&src, &dst).await;
+        }
+    }
+    if let Ok(newf) = OpenOptions::new().create(true).append(true).open(path).await {
+        *file = newf;
+    }
 }
 
 /// 读取日志文件末尾 `n` 行（MVP：整文件读取，后续按 seek 优化）。

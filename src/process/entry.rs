@@ -76,12 +76,18 @@ pub enum HealthState {
 pub struct PersistedApp {
     pub id: u32,
     pub name: String,
+    /// 同名进程组内的实例序号（0..instances）。
+    #[serde(default)]
+    pub instance_index: u32,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
     pub port: Option<u16>,
+    /// 进程组基准端口；实例 i 的端口 = port_base + i（用于 scale 扩容时分配）。
+    #[serde(default)]
+    pub port_base: Option<u16>,
     pub max_memory: Option<u64>,
     pub max_restarts: Option<u32>,
     #[serde(default)]
@@ -101,6 +107,7 @@ pub struct PersistedApp {
 pub struct ProcessInfo {
     pub id: u32,
     pub name: String,
+    pub instance_index: u32,
     pub command: String,
     pub args: Vec<String>,
     pub pid: Option<u32>,

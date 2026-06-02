@@ -25,6 +25,7 @@ tokio = { version = "1", features = [
 ] }
 # CLI 参数解析
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 # IPC 消息序列化 / state.json 持久化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
