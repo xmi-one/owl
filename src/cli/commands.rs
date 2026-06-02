@@ -65,6 +65,11 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: CompletionShell,
     },
+    /// 生成 systemd/launchd 服务单元文件
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommands,
+    },
     /// 按 owl.toml 声明式收敛（幂等；默认保留未列出的进程）
     Apply {
         /// 配置文件路径
@@ -93,6 +98,27 @@ pub enum CompletionShell {
     Fish,
     Elvish,
     Powershell,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServiceCommands {
+    /// 生成服务文件模板
+    Generate {
+        #[arg(value_enum)]
+        target: ServiceTarget,
+        /// 输出路径；不指定则打印到 stdout
+        #[arg(long)]
+        output: Option<String>,
+        /// service 名称前缀（默认 owl）
+        #[arg(long, default_value = "owl")]
+        name: String,
+    },
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum ServiceTarget {
+    Systemd,
+    Launchd,
 }
 
 #[derive(clap::Args, Debug)]

@@ -103,6 +103,21 @@ owl completions zsh > ~/.zfunc/_owl
 owl completions fish > ~/.config/fish/completions/owl.fish
 ```
 
+## 生成服务单元（Phase 3-2）
+
+```bash
+# systemd（输出到 stdout）
+owl service generate systemd
+
+# systemd（直接写文件）
+owl service generate systemd --name owl \
+  --output /etc/systemd/system/owl.service
+
+# launchd（直接写文件）
+owl service generate launchd --name owl \
+  --output ~/Library/LaunchAgents/com.owl.daemon.plist
+```
+
 ## 内置 HTTP API（Phase 3-1）
 
 - 默认监听：`127.0.0.1:8757`

@@ -4,6 +4,7 @@ pub mod client;
 pub mod commands;
 pub mod daemon_launcher;
 pub mod output;
+pub mod service;
 
 use colored::Colorize;
 use clap::CommandFactory;
@@ -12,7 +13,7 @@ use clap_complete::{generate, shells};
 use crate::common::paths;
 use crate::ipc::message::{Request, Response};
 use client::Client;
-use commands::{Cli, Commands, CompletionShell};
+use commands::{Cli, Commands, CompletionShell, ServiceCommands, ServiceTarget};
 
 /// CLI 退出码约定（见方案 7.16）。
 const EXIT_OK: i32 = 0;
@@ -120,6 +121,28 @@ pub async fn run(cli: Cli) -> i32 {
             output_completions(shell);
             EXIT_OK
         }
+        Commands::Service { command } => match command {
+            ServiceCommands::Generate {
+                target,
+                output,
+                name,
+            } => {
+                let rendered = match target {
+                    ServiceTarget::Systemd => service::render_systemd(&name),
+                    ServiceTarget::Launchd => service::render_launchd(&name),
+                };
+                match rendered.and_then(|s| service::write_or_print(&s, output.as_deref())) {
+                    Ok(msg) => {
+                        println!("{}", if color { msg.green().to_string() } else { msg });
+                        EXIT_OK
+                    }
+                    Err(e) => {
+                        eprintln!("{}", if color { e.red().to_string() } else { e });
+                        EXIT_ERR
+                    }
+                }
+            }
+        },
     }
 }
 
