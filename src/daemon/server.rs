@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::common::errors::{OwlError, Result};
 use crate::common::paths;
+use crate::daemon::api;
 use crate::daemon::handler;
 use crate::ipc::message::{Handshake, Request, Response, PROTOCOL_VERSION};
 use crate::ipc::protocol::{read_frame, write_frame};
@@ -20,6 +21,12 @@ pub async fn run() -> Result<()> {
 
     let listener = bind_listener()?;
     let mgr = manager::start_manager();
+    let api_mgr = mgr.clone();
+    let api_task = tokio::spawn(async move {
+        if let Err(e) = api::serve(api_mgr).await {
+            owl_logger::warn!("{e}");
+        }
+    });
 
     owl_logger::info!(
         "Owl Daemon 启动 (pid={}, proto={PROTOCOL_VERSION})",
@@ -55,6 +62,7 @@ pub async fn run() -> Result<()> {
     }
 
     owl_logger::info!("Daemon 优雅退出中…");
+    api_task.abort();
     mgr.shutdown().await;
     cleanup();
     Ok(())

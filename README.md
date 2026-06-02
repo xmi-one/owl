@@ -103,6 +103,39 @@ owl completions zsh > ~/.zfunc/_owl
 owl completions fish > ~/.config/fish/completions/owl.fish
 ```
 
+## 内置 HTTP API（Phase 3-1）
+
+- 默认监听：`127.0.0.1:8757`
+- 地址覆盖：环境变量 `OWL_API_ADDR`（例如 `127.0.0.1:9000`）
+- 鉴权（可选）：环境变量 `OWL_API_TOKEN`，启用后需携带
+  `Authorization: Bearer <token>`
+
+示例：
+
+```bash
+# 健康检查
+curl http://127.0.0.1:8757/api/health
+
+# 列表 / 详情
+curl http://127.0.0.1:8757/api/processes
+curl http://127.0.0.1:8757/api/processes/web
+
+# 启动
+curl -X POST http://127.0.0.1:8757/api/start \
+  -H 'content-type: application/json' \
+  -d '{"name":"web","command":"sleep","args":["30"],"cwd":null,"env":{},"instances":1,"port":null,"max_memory":null,"max_restarts":null,"restart_delay_ms":null,"restart_strategy":"OnFailure","kill_signal":null,"health_check":null,"wait_ready":false,"ready_timeout_secs":null}'
+
+# 操作
+curl -X POST http://127.0.0.1:8757/api/processes/web/restart
+curl -X POST http://127.0.0.1:8757/api/processes/web/stop
+curl -X POST http://127.0.0.1:8757/api/processes/web/delete
+```
+
+WebSocket：
+
+- 地址：`ws://127.0.0.1:8757/api/ws`
+- 每秒推送一次 `process_list` JSON。
+
 ## 设计要点
 
 - **子进程独立存活（方案 B）**：子进程经 `setsid` 脱离会话；Daemon 崩溃后子进程被 init 收养，新 Daemon 启动时按 `(pid, start_time)` 校验后重接管，避免 PID 复用误杀。
