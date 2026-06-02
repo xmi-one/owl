@@ -97,6 +97,7 @@ owl apply ecosystem.config.json
 
 - 默认每进程写入 `~/.owl/logs/<name>-<id>.log`（合并 stdout/stderr，stderr 带 `[err]` 前缀）。
 - 支持按大小轮转：超阈值后滚动为 `.1` 到 `.5` 备份文件。
+- `owl logs -n` 会跨当前日志、轮转文件和 `.gz` 日期归档聚合读取尾部内容。
 
 ## Shell 补全
 
