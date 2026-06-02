@@ -151,13 +151,14 @@ async fn gzip_file(path: PathBuf) -> Result<(), String> {
 
 /// 读取日志文件末尾 `n` 行（MVP：整文件读取，后续按 seek 优化）。
 pub async fn read_last_lines(path: &Path, n: usize) -> Vec<String> {
-    let content = match tokio::fs::read_to_string(path).await {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let all: Vec<&str> = content.lines().collect();
-    let start = all.len().saturating_sub(n);
-    all[start..].iter().map(|s| s.to_string()).collect()
+    if n == 0 {
+        return Vec::new();
+    }
+    let base = path.to_path_buf();
+    let all = tokio::task::spawn_blocking(move || read_last_lines_sync(&base, n))
+        .await
+        .unwrap_or_default();
+    all
 }
 
 /// 当前文件字节长度（用于 follow 增量读取）。
@@ -166,4 +167,84 @@ pub async fn file_len(path: &Path) -> u64 {
         .await
         .map(|m| m.len())
         .unwrap_or(0)
+}
+
+fn read_last_lines_sync(path: &Path, n: usize) -> Vec<String> {
+    let files = collect_related_logs(path);
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for p in files {
+        if let Ok(content) = read_log_content(&p) {
+            lines.extend(content.lines().map(|s| s.to_string()));
+        }
+    }
+    let start = lines.len().saturating_sub(n);
+    lines[start..].to_vec()
+}
+
+/// 收集与当前日志相关的文件：当前日志 + 轮转文件 + 日期归档(.gz)，按修改时间升序。
+fn collect_related_logs(path: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let parent = match path.parent() {
+        Some(p) => p,
+        None => return files,
+    };
+    let base = match path.file_name().and_then(|s| s.to_str()) {
+        Some(b) => b.to_string(),
+        None => return files,
+    };
+    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    if path.exists() {
+        let ts = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        candidates.push((ts, path.to_path_buf()));
+    }
+    if let Ok(rd) = std::fs::read_dir(parent) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p == path {
+                continue;
+            }
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            if !name.starts_with(&base) {
+                continue;
+            }
+            // 相关后缀示例：.1 / .2 / .YYYY-MM-DD.log / .YYYY-MM-DD.log.gz
+            let ts = p
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            candidates.push((ts, p));
+        }
+    }
+    candidates.sort_by_key(|(ts, _)| *ts);
+    files.extend(candidates.into_iter().map(|(_, p)| p));
+    files
+}
+
+fn read_log_content(path: &Path) -> Result<String, String> {
+    let is_gz = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("gz"))
+        .unwrap_or(false);
+    if is_gz {
+        let f = std::fs::File::open(path)
+            .map_err(|e| format!("打开 gzip 日志失败({}): {e}", path.display()))?;
+        let mut d = flate2::read::GzDecoder::new(f);
+        let mut out = String::new();
+        d.read_to_string(&mut out)
+            .map_err(|e| format!("解压 gzip 日志失败({}): {e}", path.display()))?;
+        Ok(out)
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|e| format!("读取日志失败({}): {e}", path.display()))
+    }
 }
