@@ -37,6 +37,23 @@ const ENV_WHITELIST: &[&str] = &[
     "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "SHELL", "TZ",
 ];
 
+#[derive(Debug, Clone, Copy)]
+pub enum ExitStatusDetail {
+    Code(i32),
+    Signal(i32),
+    Unknown,
+}
+
+impl std::fmt::Display for ExitStatusDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExitStatusDetail::Code(c) => write!(f, "exit code {}", c),
+            ExitStatusDetail::Signal(s) => write!(f, "signal {}", s),
+            ExitStatusDetail::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Intent {
     None,
@@ -153,7 +170,7 @@ pub enum Cmd {
         reply: oneshot::Sender<Result<String>>,
     },
     // 内部事件
-    Exited { id: u32, success: bool },
+    Exited { id: u32, reason: ExitStatusDetail },
     EscalateKill { id: u32 },
     RestartNow { id: u32 },
     HealthResult { id: u32, generation: u64, healthy: bool },
@@ -416,7 +433,7 @@ impl Manager {
                     generation,
                     healthy,
                 } => self.handle_health(id, generation, healthy),
-                Cmd::Exited { id, success } => self.handle_exited(id, success),
+                Cmd::Exited { id, reason } => self.handle_exited(id, reason),
                 Cmd::EscalateKill { id } => self.handle_escalate(id),
                 Cmd::RestartNow { id } => {
                     let _ = self.start_existing(id);
@@ -698,10 +715,12 @@ impl Manager {
         let app = self.apps.get_mut(&id).ok_or_else(not_found)?;
         match app.pid {
             None => {
+                owl_logger::info!("正在停止进程 [{}] {} (未运行)", id, app.cfg.name);
                 app.status = ProcessStatus::Stopped;
                 Ok(())
             }
             Some(pid) => {
+                owl_logger::info!("正在停止进程 [{}] {} (pid={})", id, app.cfg.name, pid);
                 app.cancel_health();
                 app.intent = Intent::Stop;
                 app.status = ProcessStatus::Stopping;
@@ -717,6 +736,7 @@ impl Manager {
         let app = self.apps.get_mut(&id).ok_or_else(not_found)?;
         match app.pid {
             Some(pid) => {
+                owl_logger::info!("正在重启进程 [{}] {} (pid={})", id, app.cfg.name, pid);
                 app.cancel_health();
                 app.intent = Intent::Restart;
                 app.status = ProcessStatus::Stopping;
@@ -725,7 +745,10 @@ impl Manager {
                 schedule(&self.tx, KILL_TIMEOUT, Cmd::EscalateKill { id });
                 Ok(())
             }
-            None => self.start_existing(id),
+            None => {
+                owl_logger::info!("正在启动进程 [{}] {} (当前未运行)", id, app.cfg.name);
+                self.start_existing(id)
+            }
         }
     }
 
@@ -733,6 +756,7 @@ impl Manager {
         let app = self.apps.get_mut(&id).ok_or_else(not_found)?;
         match app.pid {
             Some(pid) => {
+                owl_logger::info!("正在删除进程 [{}] {} (pid={})", id, app.cfg.name, pid);
                 app.cancel_health();
                 app.intent = Intent::Delete;
                 app.status = ProcessStatus::Stopping;
@@ -742,6 +766,7 @@ impl Manager {
                 Ok(())
             }
             None => {
+                owl_logger::info!("正在删除进程 [{}] {} (未运行)", id, app.cfg.name);
                 self.apps.remove(&id);
                 Ok(())
             }
@@ -828,13 +853,16 @@ impl Manager {
         spawn_proc(&tx, app)
     }
 
-    fn handle_exited(&mut self, id: u32, success: bool) {
+    fn handle_exited(&mut self, id: u32, reason: ExitStatusDetail) {
         enum Next {
             Remove,
             Settled,
             RestartNow,
             Schedule(Duration),
         }
+
+        let success = matches!(reason, ExitStatusDetail::Code(0));
+        let old_pid = self.apps.get(&id).and_then(|a| a.pid);
 
         let next = {
             let app = match self.apps.get_mut(&id) {
@@ -855,13 +883,18 @@ impl Manager {
             app.cancel_health();
 
             match app.intent {
-                Intent::Delete => Next::Remove,
+                Intent::Delete => {
+                    owl_logger::info!("进程 [{}] {} 已停止并删除 ({})", id, app.cfg.name, reason);
+                    Next::Remove
+                }
                 Intent::Stop => {
+                    owl_logger::info!("进程 [{}] {} 已停止 ({})", id, app.cfg.name, reason);
                     app.status = ProcessStatus::Stopped;
                     app.intent = Intent::None;
                     Next::Settled
                 }
                 Intent::Restart => {
+                    owl_logger::info!("进程 [{}] {} 已退出 ({})，正在重新拉起...", id, app.cfg.name, reason);
                     app.intent = Intent::None;
                     Next::RestartNow
                 }
@@ -872,25 +905,56 @@ impl Manager {
                         RestartStrategy::Always => true,
                     };
                     if !should {
+                        owl_logger::warn!(
+                            "进程 [{}] {} (pid={:?}) 异常退出 ({})，无重启策略，状态标记为 Stopped",
+                            id,
+                            app.cfg.name,
+                            old_pid,
+                            reason
+                        );
                         app.status = ProcessStatus::Stopped;
                         Next::Settled
                     } else {
                         app.consecutive_crashes += 1;
+                        let delay = compute_delay(app);
                         if let Some(max) = app.cfg.max_restarts {
                             if app.consecutive_crashes > max {
                                 app.status = ProcessStatus::Errored;
                                 owl_logger::error!(
-                                    "进程 [{id}] {} 超过 max_restarts({max})，标记 Errored",
-                                    app.cfg.name
+                                    "进程 [{}] {} (pid={:?}) 连续崩溃次数 ({}) 超过 max_restarts({})，标记为 Errored",
+                                    id,
+                                    app.cfg.name,
+                                    old_pid,
+                                    app.consecutive_crashes,
+                                    max
                                 );
                                 Next::Settled
                             } else {
+                                owl_logger::warn!(
+                                    "进程 [{}] {} (pid={:?}) 异常退出 ({})，将于 {:?} 后自动重启 ({}/{})",
+                                    id,
+                                    app.cfg.name,
+                                    old_pid,
+                                    reason,
+                                    delay,
+                                    app.consecutive_crashes,
+                                    max
+                                );
                                 app.status = ProcessStatus::Launching;
-                                Next::Schedule(compute_delay(app))
+                                Next::Schedule(delay)
                             }
                         } else {
+                            owl_logger::warn!(
+                                "进程 [{}] {} (pid={:?}) 异常退出 ({})，将于 {:?} 后自动重启 (连续崩溃第 {} 次)",
+                                id,
+                                app.cfg.name,
+                                old_pid,
+                                reason,
+                                delay,
+                                app.consecutive_crashes
+                            );
                             app.status = ProcessStatus::Launching;
-                            Next::Schedule(compute_delay(app))
+                            Next::Schedule(delay)
                         }
                     }
                 }
@@ -1088,9 +1152,35 @@ fn spawn_proc(tx: &mpsc::UnboundedSender<Cmd>, app: &mut App) -> Result<()> {
     let tx2 = tx.clone();
     let id = app.cfg.id;
     tokio::spawn(async move {
-        let success = child.wait().await.map(|s| s.success()).unwrap_or(false);
-        let _ = tx2.send(Cmd::Exited { id, success });
+        let reason = match child.wait().await {
+            Ok(status) => {
+                if let Some(code) = status.code() {
+                    ExitStatusDetail::Code(code)
+                } else {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        if let Some(sig) = status.signal() {
+                            ExitStatusDetail::Signal(sig)
+                        } else {
+                            ExitStatusDetail::Unknown
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    ExitStatusDetail::Unknown
+                }
+            }
+            Err(_) => ExitStatusDetail::Unknown,
+        };
+        let _ = tx2.send(Cmd::Exited { id, reason });
     });
+
+    owl_logger::info!(
+        "进程 [{}] {} (pid={}) 已启动",
+        app.cfg.id,
+        app.cfg.name,
+        pid
+    );
 
     app.pid = Some(pid);
     app.start_time = sysprobe::pid_start_time(pid);
@@ -1288,7 +1378,7 @@ fn spawn_poll_watcher(
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
             if !sysprobe::validate(pid, start_time) {
-                let _ = tx.send(Cmd::Exited { id, success: true });
+                let _ = tx.send(Cmd::Exited { id, reason: ExitStatusDetail::Unknown });
                 break;
             }
         }

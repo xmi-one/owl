@@ -33,7 +33,7 @@ serde_json = "1"
 toml = "0.8"
 # 终端彩色输出 + 表格渲染
 colored = "2"
-tabled = { version = "0.17", features = ["derive"] }
+tabled = { version = "0.17", features = ["derive", "ansi"] }
 # 时间戳格式化（存储用 epoch，显示时格式化）
 chrono = { version = "0.4", features = ["serde"] }
 # ~/.owl 路径
@@ -44,7 +44,7 @@ sysinfo = "0.33"
 thiserror = "2"
 anyhow = "1"
 # Daemon 自身日志（自家生态）
-owl-logger = "0.2.0"
+owl-logger = "0.2.2"
 axum = { version = "0.8", features = ["ws", "json"] }
 flate2 = "1"
 ratatui = "0.29.0"

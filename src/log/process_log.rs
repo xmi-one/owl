@@ -1,6 +1,6 @@
 //! 子进程 stdout/stderr 异步管道采集与文件写入，及日志尾部读取。
 
-use std::io::{Read, Write};
+use std::io::{Read, Write, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use chrono::Local;
@@ -169,19 +169,96 @@ pub async fn file_len(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+fn read_last_lines_plain_backwards(path: &Path, limit: usize) -> std::io::Result<Vec<String>> {
+    let mut file = std::fs::File::open(path)?;
+    let file_len = file.seek(SeekFrom::End(0))?;
+    if file_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let chunk_size = 4096;
+    let mut pos = file_len;
+    let mut newlines_found = 0;
+    let mut buffer = vec![0u8; chunk_size];
+    let mut ignore_last_newline = true;
+
+    while pos > 0 && newlines_found <= limit {
+        let read_size = std::cmp::min(pos, chunk_size as u64) as usize;
+        pos -= read_size as u64;
+        file.seek(SeekFrom::Start(pos))?;
+        file.read_exact(&mut buffer[..read_size])?;
+
+        for i in (0..read_size).rev() {
+            let byte = buffer[i];
+            if byte == b'\n' {
+                if ignore_last_newline && pos + i as u64 == file_len - 1 {
+                    ignore_last_newline = false;
+                    continue;
+                }
+                newlines_found += 1;
+                if newlines_found > limit {
+                    pos = pos + i as u64 + 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if newlines_found <= limit {
+        pos = 0;
+    }
+
+    file.seek(SeekFrom::Start(pos))?;
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)?;
+
+    let text = String::from_utf8_lossy(&content);
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    if lines.len() > limit {
+        let start = lines.len().saturating_sub(limit);
+        lines = lines[start..].to_vec();
+    }
+    Ok(lines)
+}
+
+fn read_last_lines_from_single_file(path: &Path, limit: usize) -> std::io::Result<Vec<String>> {
+    let is_gz = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("gz"))
+        .unwrap_or(false);
+    if is_gz {
+        let content = read_log_content(path)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+        let start = lines.len().saturating_sub(limit);
+        return Ok(lines[start..].to_vec());
+    }
+    read_last_lines_plain_backwards(path, limit)
+}
+
 fn read_last_lines_sync(path: &Path, n: usize) -> Vec<String> {
     let files = collect_related_logs(path);
     if files.is_empty() {
         return Vec::new();
     }
-    let mut lines: Vec<String> = Vec::new();
-    for p in files {
-        if let Ok(content) = read_log_content(&p) {
-            lines.extend(content.lines().map(|s| s.to_string()));
+    let mut collected_lines = Vec::new();
+    let mut needed = n;
+    for p in files.iter().rev() {
+        if needed == 0 {
+            break;
         }
+        let lines_from_file = match read_last_lines_from_single_file(p, needed) {
+            Ok(ls) => ls,
+            Err(e) => {
+                owl_logger::warn!("无法读取日志文件末尾 {}: {e}", p.display());
+                continue;
+            }
+        };
+        needed = needed.saturating_sub(lines_from_file.len());
+        collected_lines = [lines_from_file, collected_lines].concat();
     }
-    let start = lines.len().saturating_sub(n);
-    lines[start..].to_vec()
+    collected_lines
 }
 
 /// 收集与当前日志相关的文件：当前日志 + 轮转文件 + 日期归档(.gz)，按修改时间升序。

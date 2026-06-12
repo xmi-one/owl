@@ -98,14 +98,8 @@ fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
 
 /// 脚本探针：退出码 0 视为健康。
 async fn script_probe(script: &str, timeout: Duration) -> bool {
-    let mut parts = script.split_whitespace();
-    let program = match parts.next() {
-        Some(p) => p,
-        None => return false,
-    };
-    let args: Vec<&str> = parts.collect();
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(&args);
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg(script);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());

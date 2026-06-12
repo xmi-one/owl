@@ -1,7 +1,8 @@
 //! 终端输出格式化：彩色状态、人类可读表格、JSON。
 
 use colored::Colorize;
-use tabled::settings::Style;
+use tabled::settings::{Style, Remove};
+use tabled::settings::object::Rows;
 use tabled::{Table, Tabled};
 
 use crate::process::entry::{HealthState, ProcessInfo, ProcessStatus};
@@ -12,14 +13,16 @@ struct Row {
     id: u32,
     #[tabled(rename = "name")]
     name: String,
-    #[tabled(rename = "status")]
-    status: String,
+    #[tabled(rename = "mode")]
+    mode: String,
     #[tabled(rename = "pid")]
     pid: String,
-    #[tabled(rename = "restarts")]
-    restarts: u32,
     #[tabled(rename = "uptime")]
     uptime: String,
+    #[tabled(rename = "↺")]
+    restarts: String,
+    #[tabled(rename = "status")]
+    status: String,
     #[tabled(rename = "cpu")]
     cpu: String,
     #[tabled(rename = "mem")]
@@ -48,7 +51,7 @@ fn health_label(health: HealthState, color: bool) -> String {
     match health {
         HealthState::Unknown => s.dimmed().to_string(),
         HealthState::Healthy => s.green().to_string(),
-        HealthState::Unhealthy => s.red().to_string(),
+        HealthState::Unhealthy => s.red().bold().to_string(),
     }
 }
 
@@ -66,82 +69,187 @@ fn colorize_status(status: ProcessStatus, color: bool) -> String {
 }
 
 /// 渲染进程列表为表格。
-pub fn render_list(list: &[ProcessInfo], _color: bool) -> String {
+pub fn render_list(list: &[ProcessInfo], color: bool) -> String {
     if list.is_empty() {
         return "（无进程）".to_string();
     }
     let rows: Vec<Row> = list
         .iter()
-        .map(|p| Row {
-            id: p.id,
-            name: p.name.clone(),
-            // `tabled` 在不同终端对 ANSI 宽度处理不一致，可能导致列错位；
-            // 列表表格统一使用无颜色文本，保证对齐稳定。
-            status: colorize_status(p.status, false),
-            pid: p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
-            restarts: p.restarts,
-            uptime: human_duration(p.uptime_secs),
-            cpu: if p.status == ProcessStatus::Online {
-                format!("{:.1}%", p.cpu_percent)
+        .map(|p| {
+            let name_str = if color {
+                p.name.green().bold().to_string()
+            } else {
+                p.name.clone()
+            };
+            let mode_str = if color {
+                "fork".green().to_string()
+            } else {
+                "fork".to_string()
+            };
+            let restarts_str = if color {
+                if p.restarts == 0 {
+                    "0".green().to_string()
+                } else if p.restarts < 10 {
+                    p.restarts.to_string().yellow().to_string()
+                } else {
+                    p.restarts.to_string().red().bold().to_string()
+                }
+            } else {
+                p.restarts.to_string()
+            };
+            let cpu_str = if p.status == ProcessStatus::Online {
+                let s = format!("{:.1}%", p.cpu_percent);
+                if color {
+                    s.green().to_string()
+                } else {
+                    s
+                }
             } else {
                 "-".to_string()
-            },
-            mem: if p.memory_bytes == 0 {
+            };
+            let mem_str = if p.memory_bytes == 0 {
                 "-".to_string()
             } else {
-                human_size(p.memory_bytes)
-            },
-            health: health_label(p.health, false),
+                let s = human_size(p.memory_bytes);
+                if color {
+                    s.green().to_string()
+                } else {
+                    s
+                }
+            };
+            let uptime_str = {
+                let s = human_duration(p.uptime_secs);
+                if color {
+                    s.green().to_string()
+                } else {
+                    s
+                }
+            };
+
+            Row {
+                id: p.id,
+                name: name_str,
+                mode: mode_str,
+                pid: p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                uptime: uptime_str,
+                restarts: restarts_str,
+                status: colorize_status(p.status, color),
+                cpu: cpu_str,
+                mem: mem_str,
+                health: health_label(p.health, color),
+            }
         })
         .collect();
-    Table::new(rows).with(Style::rounded()).to_string()
+    Table::new(rows).with(Style::modern()).to_string()
 }
 
 /// 渲染单个进程详情。
 pub fn render_info(p: &ProcessInfo, color: bool) -> String {
-    let mut out = String::new();
-    let line = |out: &mut String, k: &str, v: String| {
-        out.push_str(&format!("{:<14} {}\n", k, v));
-    };
-    line(&mut out, "id", p.id.to_string());
-    line(&mut out, "name", p.name.clone());
-    line(&mut out, "status", colorize_status(p.status, color));
-    if p.health != HealthState::Unknown {
-        line(&mut out, "health", health_label(p.health, color));
+    #[derive(Tabled)]
+    struct InfoRow {
+        #[tabled(rename = "key")]
+        key: String,
+        #[tabled(rename = "value")]
+        value: String,
     }
-    line(
-        &mut out,
-        "command",
-        format!("{} {}", p.command, p.args.join(" ")),
-    );
-    line(
-        &mut out,
-        "pid",
-        p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
-    );
-    line(&mut out, "restarts", p.restarts.to_string());
-    line(
-        &mut out,
-        "max_restarts",
+
+    let mut rows = Vec::new();
+    let mut add_row = |key: &str, value: String| {
+        let key_str = if color {
+            key.cyan().bold().to_string()
+        } else {
+            key.to_string()
+        };
+        rows.push(InfoRow {
+            key: key_str,
+            value,
+        });
+    };
+
+    add_row("status", colorize_status(p.status, color));
+    add_row("name", if color { p.name.green().bold().to_string() } else { p.name.clone() });
+    add_row("id", p.id.to_string());
+    add_row("mode", if color { "fork".green().to_string() } else { "fork".to_string() });
+    add_row("pid", p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()));
+    
+    let restarts_str = if color {
+        if p.restarts == 0 {
+            "0".green().to_string()
+        } else if p.restarts < 10 {
+            p.restarts.to_string().yellow().to_string()
+        } else {
+            p.restarts.to_string().red().bold().to_string()
+        }
+    } else {
+        p.restarts.to_string()
+    };
+    add_row("restarts", restarts_str);
+    
+    add_row(
+        "max restarts",
         p.max_restarts
             .map(|v| v.to_string())
             .unwrap_or_else(|| "-".into()),
     );
-    line(&mut out, "uptime", human_duration(p.uptime_secs));
+    
+    add_row("uptime", {
+        let s = human_duration(p.uptime_secs);
+        if color { s.green().to_string() } else { s }
+    });
+
     if p.status == ProcessStatus::Online {
-        line(&mut out, "cpu", format!("{:.1}%", p.cpu_percent));
+        add_row("cpu", {
+            let s = format!("{:.1}%", p.cpu_percent);
+            if color { s.green().to_string() } else { s }
+        });
     }
+
     if p.memory_bytes > 0 {
-        line(&mut out, "memory", human_size(p.memory_bytes));
+        add_row("memory", {
+            let s = human_size(p.memory_bytes);
+            if color { s.green().to_string() } else { s }
+        });
     }
+
     if let Some(limit) = p.max_memory {
-        line(&mut out, "max_memory", human_size(limit));
+        add_row("max memory", human_size(limit));
     }
+
     if let Some(port) = p.port {
-        line(&mut out, "port", port.to_string());
+        add_row("port", port.to_string());
     }
-    line(&mut out, "restart", format!("{:?}", p.restart_strategy));
-    out
+
+    add_row("restart strategy", format!("{:?}", p.restart_strategy));
+    
+    if p.health != HealthState::Unknown {
+        add_row("health", health_label(p.health, color));
+    }
+
+    add_row(
+        "command",
+        format!("{} {}", p.command, p.args.join(" ")),
+    );
+
+    // 添加日志路径
+    let log_path = crate::common::paths::proc_log(&p.name, p.id);
+    add_row("log path", log_path.to_string_lossy().to_string());
+
+    let table = Table::new(rows)
+        .with(Style::modern())
+        .with(Remove::row(Rows::first()))
+        .to_string();
+
+    let title = if color {
+        format!(
+            "Describing process with id {} - name {}",
+            p.id.to_string().cyan().bold(),
+            p.name.green().bold()
+        )
+    } else {
+        format!("Describing process with id {} - name {}", p.id, p.name)
+    };
+
+    format!("{title}\n{table}\n")
 }
 
 pub fn human_size(bytes: u64) -> String {

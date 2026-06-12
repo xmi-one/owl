@@ -1,0 +1,5 @@
+[[apps]]
+name = "web-api"
+command = "sleep"
+args = ["200"]
+instances = 2
