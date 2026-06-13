@@ -391,9 +391,7 @@ fn print_simple(resp: Response, color: bool) -> i32 {
                             println!("{}", line.green());
                         } else if line.starts_with("~ restart") {
                             println!("{}", line.yellow());
-                        } else if line.starts_with("- prune") {
-                            println!("{}", line.red());
-                        } else if line.trim().starts_with("!") {
+                        } else if line.starts_with("- prune") || line.trim().starts_with("!") {
                             println!("{}", line.red());
                         } else if line.starts_with("  ok") || line.starts_with("  keep") {
                             println!("{}", line.dimmed());
@@ -846,19 +844,15 @@ fn make_detail_line<'a>(key: &'a str, val: Span<'a>) -> Line<'a> {
 
 fn print_log_line(prefix: &str, line: &str, color: bool) {
     if color {
-        if line.starts_with("[err] ") {
-            let content = &line["[err] ".len()..];
+        if let Some(content) = line.strip_prefix("[err] ") {
             println!("{} (err) | {}", prefix.red(), content.red());
         } else {
             println!("{} | {}", prefix.green(), line);
         }
+    } else if let Some(content) = line.strip_prefix("[err] ") {
+        println!("{prefix} (err) | {content}");
     } else {
-        if line.starts_with("[err] ") {
-            let content = &line["[err] ".len()..];
-            println!("{prefix} (err) | {content}");
-        } else {
-            println!("{prefix} | {line}");
-        }
+        println!("{prefix} | {line}");
     }
 }
 

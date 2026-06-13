@@ -5,16 +5,24 @@
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+use std::cell::RefCell;
+
+thread_local! {
+    static SYSTEM: RefCell<System> = RefCell::new(System::new());
+}
+
 /// 返回指定 PID 的启动时间（Unix epoch 秒），进程不存在则 `None`。
 pub fn pid_start_time(pid: u32) -> Option<u64> {
-    let mut sys = System::new();
-    let p = Pid::from_u32(pid);
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[p]),
-        true,
-        ProcessRefreshKind::nothing(),
-    );
-    sys.process(p).map(|proc_| proc_.start_time())
+    SYSTEM.with(|sys| {
+        let mut sys = sys.borrow_mut();
+        let p = Pid::from_u32(pid);
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[p]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        sys.process(p).map(|proc_| proc_.start_time())
+    })
 }
 
 /// PID 是否存活。

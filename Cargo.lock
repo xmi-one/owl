@@ -1109,7 +1109,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "owl"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1135,9 +1135,9 @@ dependencies = [
 
 [[package]]
 name = "owl-logger"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9675f6af25e82fc117c82e9ca300239610afb7167d0afa9aa72058f1ef3ee1b0"
+checksum = "800ae52ee90c8cf0991129fb674dc28e1ca465b220dbf88f7594b8ae7889a3c8"
 dependencies = [
  "chrono",
  "flate2",
@@ -1152,9 +1152,9 @@ dependencies = [
 
 [[package]]
 name = "owl-logger-macros"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11fa6371a4f1e35ff177053da895b57cb1764736b213b1baf46da61b5ad7fd0b"
+checksum = "39079461dc9d0d2b667f8f373a8ea8b672ac7e59f3842683fd2600734c3469d1"
 dependencies = [
  "proc-macro2",
  "quote",

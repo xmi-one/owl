@@ -161,14 +161,6 @@ pub async fn read_last_lines(path: &Path, n: usize) -> Vec<String> {
     all
 }
 
-/// 当前文件字节长度（用于 follow 增量读取）。
-pub async fn file_len(path: &Path) -> u64 {
-    tokio::fs::metadata(path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0)
-}
-
 fn read_last_lines_plain_backwards(path: &Path, limit: usize) -> std::io::Result<Vec<String>> {
     let mut file = std::fs::File::open(path)?;
     let file_len = file.seek(SeekFrom::End(0))?;
@@ -229,7 +221,7 @@ fn read_last_lines_from_single_file(path: &Path, limit: usize) -> std::io::Resul
         .unwrap_or(false);
     if is_gz {
         let content = read_log_content(path)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
         let start = lines.len().saturating_sub(limit);
         return Ok(lines[start..].to_vec());

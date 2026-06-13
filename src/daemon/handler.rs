@@ -137,20 +137,71 @@ where
         return Ok(());
     }
 
-    // follow：轮询文件增长，增量推送新行，直到客户端断开（写失败）。
-    let mut offset = process_log::file_len(&path).await;
+    // follow 模式：使用增量 Seek 与读取，支持轮转兜底
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => {
+            write_frame(writer, &Response::Error(format!("无法打开日志文件: {e}"))).await?;
+            return Ok(());
+        }
+    };
+    let mut offset = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let _ = file.seek(std::io::SeekFrom::Start(offset)).await;
+    let mut buf = vec![0u8; 8192];
+
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        let len = process_log::file_len(&path).await;
-        if len < offset {
-            offset = 0; // 文件被截断/轮转，重置
+
+        let path_len = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+        if path_len < offset {
+            // 文件被截断/轮转：先把旧文件 descriptor 读到 EOF 以防数据丢失
+            let mut remaining = Vec::new();
+            loop {
+                match file.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => remaining.extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+            if !remaining.is_empty() {
+                let text = String::from_utf8_lossy(&remaining);
+                let fresh: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+                if !fresh.is_empty() && write_frame(writer, &Response::LogChunk(fresh)).await.is_err() {
+                    break;
+                }
+            }
+
+            // 重新打开新文件，重置 offset
+            if let Ok(new_file) = tokio::fs::File::open(&path).await {
+                file = new_file;
+                offset = 0;
+            } else {
+                break;
+            }
         }
+
+        let metadata = match file.metadata().await {
+            Ok(m) => m,
+            Err(_) => break,
+        };
+        let len = metadata.len();
+
         if len > offset {
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                let fresh = tail_since(&content, offset);
-                if !fresh.is_empty()
-                    && write_frame(writer, &Response::LogChunk(fresh)).await.is_err()
-                {
+            let mut read_bytes = Vec::new();
+            let _ = file.seek(std::io::SeekFrom::Start(offset)).await;
+            loop {
+                match file.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => read_bytes.extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+            if !read_bytes.is_empty() {
+                let text = String::from_utf8_lossy(&read_bytes);
+                let fresh: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+                if !fresh.is_empty() && write_frame(writer, &Response::LogChunk(fresh)).await.is_err() {
                     break;
                 }
             }
@@ -345,10 +396,4 @@ where
     }
 }
 
-/// 返回文件中字节偏移 `offset` 之后的完整行。
-fn tail_since(content: &str, offset: u64) -> Vec<String> {
-    let bytes = content.as_bytes();
-    let start = (offset as usize).min(bytes.len());
-    let slice = &content[start..];
-    slice.lines().map(|s| s.to_string()).collect()
-}
+

@@ -1,6 +1,6 @@
 [package]
 name = "owl"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Owl — 高性能、语言无关的进程管理器 (Rust 版 PM2)"
@@ -44,7 +44,7 @@ sysinfo = "0.33"
 thiserror = "2"
 anyhow = "1"
 # Daemon 自身日志（自家生态）
-owl-logger = "0.2.2"
+owl-logger = "0.2.3"
 axum = { version = "0.8", features = ["ws", "json"] }
 flate2 = "1"
 ratatui = "0.29.0"

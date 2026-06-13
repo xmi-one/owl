@@ -40,7 +40,6 @@ fn render_url(url: &str, port: Option<u16>) -> String {
     }
 }
 
-/// 裸 HTTP GET：2xx/3xx 视为健康。
 async fn http_probe(url: &str, timeout: Duration) -> bool {
     let parsed = match parse_http_url(url) {
         Some(v) => v,
@@ -49,8 +48,13 @@ async fn http_probe(url: &str, timeout: Duration) -> bool {
     let (host, port, path) = parsed;
     let fut = async {
         let mut stream = TcpStream::connect((host.as_str(), port)).await.ok()?;
+        let host_header = if port == 80 {
+            host.clone()
+        } else {
+            format!("{host}:{port}")
+        };
         let req = format!(
-            "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: owl\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.0\r\nHost: {host_header}\r\nUser-Agent: owl\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(req.as_bytes()).await.ok()?;
         let mut buf = Vec::with_capacity(256);
@@ -86,34 +90,61 @@ fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
-    let (host, port) = match authority.rsplit_once(':') {
+    let (mut host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()?),
         None => (authority.to_string(), 80),
     };
     if host.is_empty() {
         return None;
     }
+    if host.starts_with('[') && host.ends_with(']') {
+        host = host[1..host.len() - 1].to_string();
+    }
     Some((host, port, path.to_string()))
 }
 
-/// 脚本探针：退出码 0 视为健康。
 async fn script_probe(script: &str, timeout: Duration) -> bool {
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c").arg(script);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => return false,
     };
-    matches!(
-        tokio::time::timeout(timeout, wait_status(child)).await,
-        Ok(Some(true))
-    )
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status.success(),
+        _ => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            false
+        }
+    }
 }
 
-async fn wait_status(mut child: tokio::process::Child) -> Option<bool> {
-    let status = child.wait().await.ok()?;
-    Some(status.success())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_script_probe_success() {
+        assert!(script_probe("exit 0", Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test]
+    async fn test_script_probe_failure() {
+        assert!(!script_probe("exit 1", Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test]
+    async fn test_script_probe_timeout() {
+        let start = std::time::Instant::now();
+        let healthy = script_probe("sleep 5", Duration::from_secs(1)).await;
+        assert!(!healthy);
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_secs(1));
+        assert!(elapsed < Duration::from_secs(3));
+    }
 }
+

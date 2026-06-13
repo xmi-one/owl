@@ -77,11 +77,11 @@ async fn serve_conn(
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
-    // 第一帧：握手。
-    let hs: Option<Handshake> = read_frame(&mut reader).await?;
-    let hs = match hs {
-        Some(h) => h,
-        None => return Ok(()),
+    // 第一帧：握手，带 3s 超时。
+    let hs_fut = read_frame::<_, Handshake>(&mut reader);
+    let hs = match tokio::time::timeout(std::time::Duration::from_secs(3), hs_fut).await {
+        Ok(Ok(Some(h))) => h,
+        _ => return Ok(()), // 超时、关闭或出错直接断开
     };
     if hs.protocol_version != PROTOCOL_VERSION {
         write_frame(
