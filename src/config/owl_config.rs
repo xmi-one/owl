@@ -112,9 +112,7 @@ pub fn load_file(path: &str) -> Result<Vec<StartOptions>> {
 
 fn spec_to_options(spec: AppSpec) -> Result<StartOptions> {
     let restart_strategy = match &spec.restart_strategy {
-        Some(s) => s
-            .parse::<RestartStrategy>()
-            .map_err(OwlError::Invalid)?,
+        Some(s) => s.parse::<RestartStrategy>().map_err(OwlError::Invalid)?,
         None => RestartStrategy::default(),
     };
     let max_memory = match &spec.max_memory {
@@ -175,5 +173,25 @@ pub fn parse_size(s: &str) -> std::result::Result<u64, String> {
         .trim()
         .parse()
         .map_err(|_| format!("无法解析大小: {s}"))?;
-    Ok((value * mult as f64) as u64)
+    let bytes = value * mult as f64;
+    if !bytes.is_finite() || bytes < 0.0 || bytes > u64::MAX as f64 {
+        return Err(format!("大小超出合法范围: {s}"));
+    }
+    Ok(bytes as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_size;
+
+    #[test]
+    fn parse_size_rejects_invalid_ranges() {
+        assert!(parse_size("-1M").is_err());
+        assert!(parse_size("1e400").is_err());
+    }
+
+    #[test]
+    fn parse_size_supports_units() {
+        assert_eq!(parse_size("1.5M").unwrap(), 1_572_864);
+    }
 }

@@ -81,9 +81,7 @@ fn to_start_options(app: EcoApp) -> Result<StartOptions> {
         max_restarts: app.max_restarts,
         restart_delay_ms: app.restart_delay,
         restart_strategy,
-        kill_signal: app
-            .kill_timeout
-            .map(|_| "SIGTERM".to_string()), // 先保守映射，后续可加 timeout->graceful stop
+        kill_signal: app.kill_timeout.map(|_| "SIGTERM".to_string()), // 先保守映射，后续可加 timeout->graceful stop
         health_check: None,
         wait_ready: false,
         ready_timeout_secs: None,

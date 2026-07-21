@@ -31,10 +31,27 @@ pub fn api_addr() -> SocketAddr {
         .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 8757)))
 }
 
+/// 非回环监听会把进程控制接口暴露给网络，因此必须显式配置 token。
+pub fn validate_config() -> Result<(), String> {
+    let addr = api_addr();
+    let has_token = std::env::var("OWL_API_TOKEN")
+        .ok()
+        .is_some_and(|token| !token.is_empty());
+    if !addr.ip().is_loopback() && !has_token {
+        return Err(format!(
+            "拒绝在非回环地址 {addr} 暴露 HTTP API：请设置 OWL_API_TOKEN"
+        ));
+    }
+    Ok(())
+}
+
 /// 启动 HTTP API 服务（持续运行直到被外部 abort）。
 pub async fn serve(mgr: ManagerHandle) -> Result<(), String> {
     let addr = api_addr();
-    let token = std::env::var("OWL_API_TOKEN").ok().filter(|s| !s.is_empty());
+    let token = std::env::var("OWL_API_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    validate_config()?;
     let state = ApiState { mgr, token };
 
     let app = Router::new()
@@ -146,11 +163,7 @@ async fn start(
     }
 }
 
-async fn ws(
-    State(st): State<ApiState>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Response {
+async fn ws(State(st): State<ApiState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
     if let Some(resp) = auth_failed(&headers, st.token.as_deref()) {
         return resp;
     }

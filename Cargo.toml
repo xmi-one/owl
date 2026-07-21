@@ -1,6 +1,6 @@
 [package]
 name = "owl"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.85"
 description = "Owl — 高性能、语言无关的进程管理器 (Rust 版 PM2)"

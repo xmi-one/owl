@@ -42,5 +42,11 @@ pub fn proc_log(name: &str, id: u32) -> PathBuf {
 pub fn ensure_dirs() -> std::io::Result<()> {
     std::fs::create_dir_all(owl_home())?;
     std::fs::create_dir_all(logs_dir())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(owl_home(), std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(logs_dir(), std::fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
 }

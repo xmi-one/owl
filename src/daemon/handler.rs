@@ -12,11 +12,7 @@ use crate::process::manager::ManagerHandle;
 /// 处理单个请求。返回 `Ok(true)` 表示请求已要求 Daemon 关闭（Kill）。
 ///
 /// 对流式请求（logs --follow）会直接向 `writer` 连续写入多帧。
-pub async fn handle<W>(
-    mgr: &ManagerHandle,
-    req: Request,
-    writer: &mut W,
-) -> Result<bool, OwlError>
+pub async fn handle<W>(mgr: &ManagerHandle, req: Request, writer: &mut W) -> Result<bool, OwlError>
 where
     W: AsyncWrite + Unpin,
 {
@@ -96,10 +92,7 @@ where
     }
 }
 
-async fn reply_result<W>(
-    writer: &mut W,
-    result: Result<String, OwlError>,
-) -> Result<bool, OwlError>
+async fn reply_result<W>(writer: &mut W, result: Result<String, OwlError>) -> Result<bool, OwlError>
 where
     W: AsyncWrite + Unpin,
 {
@@ -154,8 +147,14 @@ where
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
-        let path_len = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
-        if path_len < offset {
+        let path_metadata = tokio::fs::metadata(&path).await.ok();
+        let path_len = path_metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let open_metadata = file.metadata().await.ok();
+        let rotated = match (path_metadata.as_ref(), open_metadata.as_ref()) {
+            (Some(current), Some(open)) => file_replaced(current, open),
+            _ => false,
+        };
+        if rotated || path_len < offset {
             // 文件被截断/轮转：先把旧文件 descriptor 读到 EOF 以防数据丢失
             let mut remaining = Vec::new();
             loop {
@@ -168,7 +167,11 @@ where
             if !remaining.is_empty() {
                 let text = String::from_utf8_lossy(&remaining);
                 let fresh: Vec<String> = text.lines().map(|s| s.to_string()).collect();
-                if !fresh.is_empty() && write_frame(writer, &Response::LogChunk(fresh)).await.is_err() {
+                if !fresh.is_empty()
+                    && write_frame(writer, &Response::LogChunk(fresh))
+                        .await
+                        .is_err()
+                {
                     break;
                 }
             }
@@ -201,7 +204,11 @@ where
             if !read_bytes.is_empty() {
                 let text = String::from_utf8_lossy(&read_bytes);
                 let fresh: Vec<String> = text.lines().map(|s| s.to_string()).collect();
-                if !fresh.is_empty() && write_frame(writer, &Response::LogChunk(fresh)).await.is_err() {
+                if !fresh.is_empty()
+                    && write_frame(writer, &Response::LogChunk(fresh))
+                        .await
+                        .is_err()
+                {
                     break;
                 }
             }
@@ -209,6 +216,17 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn file_replaced(current: &std::fs::Metadata, open: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    current.dev() != open.dev() || current.ino() != open.ino()
+}
+
+#[cfg(not(unix))]
+fn file_replaced(_current: &std::fs::Metadata, _open: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// 等待进程就绪并流式回报（见 7.14）。就绪优先级：health_check > TCP port > 最小存活时长。
@@ -230,7 +248,11 @@ where
     let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
     let probe_timeout = Duration::from_secs(2);
 
-    write_frame(writer, &Response::Progress(format!("等待 [{id}] {} 就绪…", info.name))).await?;
+    write_frame(
+        writer,
+        &Response::Progress(format!("等待 [{id}] {} 就绪…", info.name)),
+    )
+    .await?;
 
     loop {
         if Instant::now() >= deadline {
@@ -258,11 +280,7 @@ where
                     }
                 }
                 ProcessStatus::Errored | ProcessStatus::Stopped => {
-                    write_frame(
-                        writer,
-                        &Response::Error("进程在就绪前已退出".into()),
-                    )
-                    .await?;
+                    write_frame(writer, &Response::Error("进程在就绪前已退出".into())).await?;
                     return Ok(());
                 }
                 _ => {}
@@ -295,11 +313,7 @@ where
         .await
         .map_err(|e| OwlError::Other(e.to_string()))?;
     if instances.is_empty() {
-        write_frame(
-            writer,
-            &Response::Error(format!("未找到进程组: {target}")),
-        )
-        .await?;
+        write_frame(writer, &Response::Error(format!("未找到进程组: {target}"))).await?;
         return Ok(());
     }
 
@@ -313,6 +327,10 @@ where
         // 记录当前信息用于 wait_ready 中的 id/name。
         let info = mgr
             .info(id.to_string())
+            .await
+            .map_err(|e| OwlError::Other(e.to_string()))?;
+        let health_check = mgr
+            .health_config(info.id)
             .await
             .map_err(|e| OwlError::Other(e.to_string()))?;
 
@@ -330,70 +348,13 @@ where
             .await
             .map_err(|e| OwlError::Other(e.to_string()))?;
 
-        wait_instance_online(mgr, info.id, 60, writer).await?;
+        // 与 `start --wait-ready` 采用相同判定：健康检查优先，其次 TCP 端口，
+        // 最后才是最小存活时间；不能只因 spawn 成功就宣称 reload 成功。
+        wait_ready(mgr, info, health_check, 60, writer).await?;
     }
 
-    write_frame(
-        writer,
-        &Response::Ok(format!("reload {target} 完成")),
-    )
-    .await?;
+    write_frame(writer, &Response::Ok(format!("reload {target} 完成"))).await?;
     // 小睡一会儿让输出 flush。
     tokio::time::sleep(Duration::from_millis(10)).await;
     Ok(())
 }
-
-/// reload 专用等待：容忍 Stopping/Stopped/Launching 过渡，仅在超时或 Errored 失败。
-async fn wait_instance_online<W>(
-    mgr: &ManagerHandle,
-    id: u32,
-    timeout_secs: u64,
-    writer: &mut W,
-) -> Result<(), OwlError>
-where
-    W: AsyncWrite + Unpin,
-{
-    use crate::process::entry::ProcessStatus;
-    use std::time::{Duration, Instant};
-
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
-    loop {
-        if Instant::now() >= deadline {
-            write_frame(
-                writer,
-                &Response::Error(format!("reload 等待实例 {id} 就绪超时（{timeout_secs}s）")),
-            )
-            .await?;
-            return Ok(());
-        }
-        match mgr.info(id.to_string()).await {
-            Ok(info) => match info.status {
-                ProcessStatus::Online => {
-                    write_frame(
-                        writer,
-                        &Response::Progress(format!(" -> ok [{}]", id)),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                ProcessStatus::Errored => {
-                    write_frame(
-                        writer,
-                        &Response::Error(format!("实例 {id} 在 reload 期间进入 errored")),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                _ => {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                }
-            },
-            Err(e) => {
-                write_frame(writer, &Response::Error(e.to_string())).await?;
-                return Ok(());
-            }
-        }
-    }
-}
-
-

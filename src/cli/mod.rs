@@ -6,20 +6,20 @@ pub mod daemon_launcher;
 pub mod output;
 pub mod service;
 
+use clap::CommandFactory;
+use clap_complete::{generate, shells};
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use clap::CommandFactory;
-use clap_complete::{generate, shells};
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::Terminal;
 
 use crate::common::paths;
 use crate::ipc::message::{Request, Response};
@@ -57,7 +57,7 @@ pub async fn run(cli: Cli) -> i32 {
                             println!(
                                 "{}",
                                 serde_json::to_string_pretty(&info).unwrap_or_default()
-                             );
+                            );
                         } else {
                             let msg = format!("已启动 [{}] {}", info.id, info.name);
                             println!("{}", if color { msg.green().to_string() } else { msg });
@@ -74,7 +74,10 @@ pub async fn run(cli: Cli) -> i32 {
         Commands::List => match one_shot(Request::List).await {
             Ok(Response::ProcessList(list)) => {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&list).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&list).unwrap_or_default()
+                    );
                 } else {
                     println!("{}", output::render_list(&list, color));
                 }
@@ -86,7 +89,10 @@ pub async fn run(cli: Cli) -> i32 {
         Commands::Info { target } => match one_shot(Request::Info { target }).await {
             Ok(Response::ProcessDetail(info)) => {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&info).unwrap_or_default()
+                    );
                 } else {
                     print!("{}", output::render_info(&info, color));
                 }
@@ -96,10 +102,18 @@ pub async fn run(cli: Cli) -> i32 {
             Err(code) => code,
         },
         Commands::Stop { target } => simple_with_list(Request::Stop { target }, json, color).await,
-        Commands::Restart { target } => simple_with_list(Request::Restart { target }, json, color).await,
-        Commands::Delete { target } => simple_with_list(Request::Delete { target }, json, color).await,
-        Commands::Flush { target } => simple_with_list(Request::Flush { target }, json, color).await,
-        Commands::Reset { target } => simple_with_list(Request::Reset { target }, json, color).await,
+        Commands::Restart { target } => {
+            simple_with_list(Request::Restart { target }, json, color).await
+        }
+        Commands::Delete { target } => {
+            simple_with_list(Request::Delete { target }, json, color).await
+        }
+        Commands::Flush { target } => {
+            simple_with_list(Request::Flush { target }, json, color).await
+        }
+        Commands::Reset { target } => {
+            simple_with_list(Request::Reset { target }, json, color).await
+        }
         Commands::Apply {
             file,
             prune,
@@ -108,7 +122,14 @@ pub async fn run(cli: Cli) -> i32 {
             let apps = match crate::config::load_file_auto(&file) {
                 Ok(a) => a,
                 Err(e) => {
-                    eprintln!("{}", if color { e.to_string().red().to_string() } else { e.to_string() });
+                    eprintln!(
+                        "{}",
+                        if color {
+                            e.to_string().red().to_string()
+                        } else {
+                            e.to_string()
+                        }
+                    );
                     return EXIT_ERR;
                 }
             };
@@ -137,13 +158,9 @@ pub async fn run(cli: Cli) -> i32 {
         Commands::Scale { target, n } => {
             simple_with_list(Request::Scale { target, n }, json, color).await
         }
-        Commands::Reload { target } => {
-            reload_stream(target, color).await
-        }
+        Commands::Reload { target } => reload_stream(target, color).await,
         Commands::Monit { interval, count } => monit(interval, count, json, color).await,
-        Commands::Save { file } => {
-            simple(Request::Save { file }, color).await
-        }
+        Commands::Save { file } => simple(Request::Save { file }, color).await,
         Commands::Resurrect { file } => {
             let req = Request::Resurrect { file };
             if json {
@@ -274,7 +291,10 @@ async fn start_wait(req: Request, json: bool, color: bool) -> i32 {
             }
             Ok(Some(Response::Ready(info))) => {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&info).unwrap_or_default()
+                    );
                 } else {
                     let msg = format!("\n已就绪 [{}] {}", info.id, info.name);
                     println!("{}", if color { msg.green().to_string() } else { msg });
@@ -292,7 +312,14 @@ async fn start_wait(req: Request, json: bool, color: bool) -> i32 {
                 return EXIT_OK;
             }
             Ok(Some(Response::Error(e))) => {
-                eprintln!("\n{}", if color { e.red().to_string() } else { e.clone() });
+                eprintln!(
+                    "\n{}",
+                    if color {
+                        e.red().to_string()
+                    } else {
+                        e.clone()
+                    }
+                );
                 return EXIT_ERR;
             }
             Ok(Some(_)) => {}
@@ -318,9 +345,13 @@ async fn wait_for_settle(target: &str) {
                 let is_settled = if target == "all" {
                     !list.iter().any(|p| p.status == ProcessStatus::Stopping)
                 } else if let Ok(target_id) = target.parse::<u32>() {
-                    !list.iter().any(|p| p.id == target_id && p.status == ProcessStatus::Stopping)
+                    !list
+                        .iter()
+                        .any(|p| p.id == target_id && p.status == ProcessStatus::Stopping)
                 } else {
-                    !list.iter().any(|p| p.name == target && p.status == ProcessStatus::Stopping)
+                    !list
+                        .iter()
+                        .any(|p| p.name == target && p.status == ProcessStatus::Stopping)
                 };
                 if is_settled {
                     break;
@@ -385,7 +416,8 @@ fn print_simple(resp: Response, color: bool) -> i32 {
     match resp {
         Response::Ok(msg) => {
             if color {
-                if msg.starts_with("apply 完成：") || msg.starts_with("apply --dry-run 预览：") {
+                if msg.starts_with("apply 完成：") || msg.starts_with("apply --dry-run 预览：")
+                {
                     for line in msg.lines() {
                         if line.starts_with("+ start") {
                             println!("{}", line.green());
@@ -408,7 +440,14 @@ fn print_simple(resp: Response, color: bool) -> i32 {
             EXIT_OK
         }
         Response::Error(e) => {
-            eprintln!("{}", if color { e.red().to_string() } else { e.clone() });
+            eprintln!(
+                "{}",
+                if color {
+                    e.red().to_string()
+                } else {
+                    e.clone()
+                }
+            );
             if e.contains("未找到") {
                 EXIT_NOT_FOUND
             } else {
@@ -494,7 +533,11 @@ async fn logs(target: String, lines: usize, follow: bool, color: bool) -> i32 {
     };
 
     // Resolve prefix first using Request::Info
-    let prefix = match one_shot(Request::Info { target: target.clone() }).await {
+    let prefix = match one_shot(Request::Info {
+        target: target.clone(),
+    })
+    .await
+    {
         Ok(Response::ProcessDetail(info)) => {
             format!("{}-{}", info.name, info.id)
         }
@@ -519,8 +562,19 @@ async fn logs(target: String, lines: usize, follow: bool, color: bool) -> i32 {
             }
             Ok(Some(Response::StreamEnd)) => return EXIT_OK,
             Ok(Some(Response::Error(e))) => {
-                eprintln!("{}", if color { e.red().to_string() } else { e.clone() });
-                return if e.contains("未找到") { EXIT_NOT_FOUND } else { EXIT_ERR };
+                eprintln!(
+                    "{}",
+                    if color {
+                        e.red().to_string()
+                    } else {
+                        e.clone()
+                    }
+                );
+                return if e.contains("未找到") {
+                    EXIT_NOT_FOUND
+                } else {
+                    EXIT_ERR
+                };
             }
             Ok(Some(_)) => {}
             Ok(None) => return EXIT_OK,
@@ -612,7 +666,11 @@ async fn monit_tui(interval_secs: u64) -> i32 {
             let size = f.area();
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(8), Constraint::Length(8), Constraint::Length(1)])
+                .constraints([
+                    Constraint::Min(8),
+                    Constraint::Length(8),
+                    Constraint::Length(1),
+                ])
                 .split(size);
 
             let header = Row::new(vec![
@@ -643,8 +701,16 @@ async fn monit_tui(interval_secs: u64) -> i32 {
 
                     Row::new(vec![
                         Cell::new(p.id.to_string()),
-                        Cell::new(p.name.clone()).style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                        Cell::new(p.status.to_string()).style(Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                        Cell::new(p.name.clone()).style(
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Cell::new(p.status.to_string()).style(
+                            Style::default()
+                                .fg(status_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Cell::new(p.pid.map(|x| x.to_string()).unwrap_or_else(|| "-".into())),
                         Cell::new(output::human_duration(p.uptime_secs)),
                         Cell::new(if p.status.to_string() == "online" {
@@ -657,7 +723,8 @@ async fn monit_tui(interval_secs: u64) -> i32 {
                         } else {
                             output::human_size(p.memory_bytes)
                         }),
-                        Cell::new(format!("{:?}", p.health).to_lowercase()).style(Style::default().fg(health_color)),
+                        Cell::new(format!("{:?}", p.health).to_lowercase())
+                            .style(Style::default().fg(health_color)),
                     ])
                 })
                 .collect();
@@ -682,7 +749,11 @@ async fn monit_tui(interval_secs: u64) -> i32 {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan)),
             )
-            .row_highlight_style(Style::default().bg(Color::Blue).add_modifier(Modifier::BOLD))
+            .row_highlight_style(
+                Style::default()
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol(">> ");
             let mut table_state = TableState::default();
             if !last.is_empty() {
@@ -694,9 +765,14 @@ async fn monit_tui(interval_secs: u64) -> i32 {
             f.render_stateful_widget(table, chunks[0], &mut table_state);
 
             let detail_text = if let Some(p) = last.get(selected) {
-                let name_span = Span::styled(p.name.clone(), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+                let name_span = Span::styled(
+                    p.name.clone(),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                );
                 let cmd_span = Span::raw(format!("{} {}", p.command, p.args.join(" ")));
-                
+
                 let restarts_color = if p.restarts == 0 {
                     Color::Green
                 } else if p.restarts < 10 {
@@ -704,11 +780,18 @@ async fn monit_tui(interval_secs: u64) -> i32 {
                 } else {
                     Color::Red
                 };
-                let restarts_span = Span::styled(p.restarts.to_string(), Style::default().fg(restarts_color));
-                let uptime_span = Span::styled(output::human_duration(p.uptime_secs), Style::default().fg(Color::Green));
+                let restarts_span =
+                    Span::styled(p.restarts.to_string(), Style::default().fg(restarts_color));
+                let uptime_span = Span::styled(
+                    output::human_duration(p.uptime_secs),
+                    Style::default().fg(Color::Green),
+                );
 
                 let cpu_span = if p.status.to_string() == "online" {
-                    Span::styled(make_progress_bar(p.cpu_percent, 15), Style::default().fg(Color::Green))
+                    Span::styled(
+                        make_progress_bar(p.cpu_percent, 15),
+                        Style::default().fg(Color::Green),
+                    )
                 } else {
                     Span::styled("OFFLINE", Style::default().fg(Color::DarkGray))
                 };
@@ -740,8 +823,13 @@ async fn monit_tui(interval_secs: u64) -> i32 {
                     crate::process::entry::HealthState::Unhealthy => Color::Red,
                     crate::process::entry::HealthState::Unknown => Color::DarkGray,
                 };
-                let health_span = Span::styled(format!("{:?}", p.health).to_lowercase(), Style::default().fg(health_color).add_modifier(Modifier::BOLD));
-                
+                let health_span = Span::styled(
+                    format!("{:?}", p.health).to_lowercase(),
+                    Style::default()
+                        .fg(health_color)
+                        .add_modifier(Modifier::BOLD),
+                );
+
                 let strategy_span = Span::raw(format!("{:?}", p.restart_strategy));
 
                 ratatui::text::Text::from(vec![
@@ -836,7 +924,9 @@ fn make_detail_line<'a>(key: &'a str, val: Span<'a>) -> Line<'a> {
     Line::from(vec![
         Span::styled(
             format!("{:<18}", key),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         val,
     ])

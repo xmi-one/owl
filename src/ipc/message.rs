@@ -54,20 +54,51 @@ pub struct StartOptions {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Request {
     Start(Box<StartOptions>),
-    Stop { target: String },
-    Restart { target: String },
-    Delete { target: String },
+    Stop {
+        target: String,
+    },
+    Restart {
+        target: String,
+    },
+    Delete {
+        target: String,
+    },
     List,
-    Info { target: String },
-    Logs { target: String, lines: usize, follow: bool },
-    Flush { target: String },
-    Reset { target: String },
-    Apply { apps: Vec<StartOptions>, prune: bool, dry_run: bool },
-    Scale { target: String, n: u32 },
-    Reload { target: String },
-    Save { file: Option<String> },
-    Resurrect { file: Option<String> },
-    SetLogLevel { level: String },
+    Info {
+        target: String,
+    },
+    Logs {
+        target: String,
+        lines: usize,
+        follow: bool,
+    },
+    Flush {
+        target: String,
+    },
+    Reset {
+        target: String,
+    },
+    Apply {
+        apps: Vec<StartOptions>,
+        prune: bool,
+        dry_run: bool,
+    },
+    Scale {
+        target: String,
+        n: u32,
+    },
+    Reload {
+        target: String,
+    },
+    Save {
+        file: Option<String>,
+    },
+    Resurrect {
+        file: Option<String>,
+    },
+    SetLogLevel {
+        level: String,
+    },
     Kill,
 }
 
@@ -84,6 +115,8 @@ pub enum Response {
     /// --wait-ready 判定就绪。
     Ready(ProcessInfo),
     StreamEnd,
-    VersionMismatch { daemon_version: u32 },
+    VersionMismatch {
+        daemon_version: u32,
+    },
     Error(String),
 }

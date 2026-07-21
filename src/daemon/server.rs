@@ -17,10 +17,19 @@ use crate::process::manager::{self, ManagerHandle};
 /// 运行 Daemon 主循环。阻塞直到收到 Kill 或 SIGTERM/SIGINT。
 pub async fn run() -> Result<()> {
     paths::ensure_dirs()?;
-    write_pid_file()?;
-
+    api::validate_config().map_err(OwlError::Invalid)?;
     let listener = bind_listener()?;
-    let mgr = manager::start_manager();
+    if let Err(e) = write_pid_file() {
+        let _ = std::fs::remove_file(paths::socket_path());
+        return Err(e);
+    }
+    let mgr = match manager::start_manager() {
+        Ok(mgr) => mgr,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
     let api_mgr = mgr.clone();
     let api_task = tokio::spawn(async move {
         if let Err(e) = api::serve(api_mgr).await {

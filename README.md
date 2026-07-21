@@ -56,7 +56,7 @@ owl kill
 | `--restart-delay <MS>` | 固定重启间隔（设置后禁用指数退避） |
 | `--kill-signal <SIG>` | 停止信号（默认 `SIGTERM`） |
 | `--instances <N>` | 多实例启动（同名进程组） |
-| `--port <P\|auto:START-END>` | 端口基准；实例 i 使用 `START+i` |
+| `--port <P\|auto:START-END>` | 端口基准；实例 i 使用 `START+i`，声明范围是硬上限 |
 | `--health-url <URL>` | 健康探针 URL（支持 `{port}`） |
 | `--health-script <CMD>` | 脚本健康探针（exit 0=健康） |
 | `--wait-ready` | 启动后阻塞直到就绪 |
@@ -131,6 +131,8 @@ owl service generate launchd --name owl \
 - 地址覆盖：环境变量 `OWL_API_ADDR`（例如 `127.0.0.1:9000`）
 - 鉴权（可选）：环境变量 `OWL_API_TOKEN`，启用后需携带
   `Authorization: Bearer <token>`
+- 安全边界：若 `OWL_API_ADDR` 配置为非回环地址，必须同时设置
+  `OWL_API_TOKEN`，否则 Daemon 拒绝启动。
 
 示例：
 
@@ -164,6 +166,10 @@ WebSocket：
 - **Actor 并发模型**：`ProcessManager` 状态由单 task 独占，IPC / supervisor / 定时器经 channel 通信，无锁跨 `await`。
 - **崩溃退避**：默认指数退避（1s→16s 封顶）；`max_restarts` 指窗口内连续崩溃次数，长稳运行后自动清零。
 - **原子持久化**：`state.json` 采用临时文件 + rename，带 `schema_version`。
+- **安全收敛**：`apply` 以同名实例组为单位更新全部实例并收敛实例数；启动和
+  扩容先完成名称、端口范围与冲突校验，spawn 失败会回滚本次新建实例。
+- **单 writer 日志**：stdout/stderr 经有界 channel 汇入同一个 writer，再由该 writer
+  独占轮转，避免双 collector 并发 rename 导致的日志错乱。
 - **低占用**：单线程 `current_thread` 运行时 + 精简 tokio features；release 采用 `opt-level=z + lto + strip`。
 - **生产级健壮性与性能优化**：
   - **健康检查防泄漏**：脚本健康探测超时后自动执行强制 Kill 与 wait 收割，彻底避免僵尸进程积压。
@@ -178,7 +184,7 @@ WebSocket：
 ├── owl.sock        # UDS（0600）
 ├── owl.lock        # 单例 flock
 ├── daemon.pid      # Daemon PID
-├── state.json      # 持久化配置
+├── state.json      # 持久化配置（0600；损坏时拒绝覆盖）
 └── logs/
     ├── owl-daemon-*.log    # Daemon 自身日志（owl-logger）
     └── <name>-<id>.log     # 各进程合并日志

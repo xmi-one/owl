@@ -1,8 +1,8 @@
 //! 终端输出格式化：彩色状态、人类可读表格、JSON。
 
 use colored::Colorize;
-use tabled::settings::{Style, Remove};
 use tabled::settings::object::Rows;
+use tabled::settings::{Remove, Style};
 use tabled::{Table, Tabled};
 
 use crate::process::entry::{HealthState, ProcessInfo, ProcessStatus};
@@ -167,11 +167,28 @@ pub fn render_info(p: &ProcessInfo, color: bool) -> String {
     };
 
     add_row("status", colorize_status(p.status, color));
-    add_row("name", if color { p.name.green().bold().to_string() } else { p.name.clone() });
+    add_row(
+        "name",
+        if color {
+            p.name.green().bold().to_string()
+        } else {
+            p.name.clone()
+        },
+    );
     add_row("id", p.id.to_string());
-    add_row("mode", if color { "fork".green().to_string() } else { "fork".to_string() });
-    add_row("pid", p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()));
-    
+    add_row(
+        "mode",
+        if color {
+            "fork".green().to_string()
+        } else {
+            "fork".to_string()
+        },
+    );
+    add_row(
+        "pid",
+        p.pid.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+    );
+
     let restarts_str = if color {
         if p.restarts == 0 {
             "0".green().to_string()
@@ -184,30 +201,42 @@ pub fn render_info(p: &ProcessInfo, color: bool) -> String {
         p.restarts.to_string()
     };
     add_row("restarts", restarts_str);
-    
+
     add_row(
         "max restarts",
         p.max_restarts
             .map(|v| v.to_string())
             .unwrap_or_else(|| "-".into()),
     );
-    
+
     add_row("uptime", {
         let s = human_duration(p.uptime_secs);
-        if color { s.green().to_string() } else { s }
+        if color {
+            s.green().to_string()
+        } else {
+            s
+        }
     });
 
     if p.status == ProcessStatus::Online {
         add_row("cpu", {
             let s = format!("{:.1}%", p.cpu_percent);
-            if color { s.green().to_string() } else { s }
+            if color {
+                s.green().to_string()
+            } else {
+                s
+            }
         });
     }
 
     if p.memory_bytes > 0 {
         add_row("memory", {
             let s = human_size(p.memory_bytes);
-            if color { s.green().to_string() } else { s }
+            if color {
+                s.green().to_string()
+            } else {
+                s
+            }
         });
     }
 
@@ -220,15 +249,12 @@ pub fn render_info(p: &ProcessInfo, color: bool) -> String {
     }
 
     add_row("restart strategy", format!("{:?}", p.restart_strategy));
-    
+
     if p.health != HealthState::Unknown {
         add_row("health", health_label(p.health, color));
     }
 
-    add_row(
-        "command",
-        format!("{} {}", p.command, p.args.join(" ")),
-    );
+    add_row("command", format!("{} {}", p.command, p.args.join(" ")));
 
     // 添加日志路径
     let log_path = crate::common::paths::proc_log(&p.name, p.id);

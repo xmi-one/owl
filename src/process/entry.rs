@@ -88,6 +88,12 @@ pub struct PersistedApp {
     /// 进程组基准端口；实例 i 的端口 = port_base + i（用于 scale 扩容时分配）。
     #[serde(default)]
     pub port_base: Option<u16>,
+    /// 进程组可分配的最大端口。`None` 表示未配置端口。
+    ///
+    /// 旧 state.json 中没有此字段；恢复时会将已有 `port_base` 迁移为
+    /// `u16::MAX`，保持旧版本“单端口可顺延扩容”的语义。
+    #[serde(default)]
+    pub port_max: Option<u16>,
     pub max_memory: Option<u64>,
     pub max_restarts: Option<u32>,
     #[serde(default)]

@@ -66,7 +66,10 @@ mod tests {
 
     fn get_test_owl_home() -> std::path::PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join(format!("test_owl_home_{}", now));
@@ -87,11 +90,16 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
-            
-            let hs = read_frame::<_, Handshake>(&mut reader).await.unwrap().unwrap();
+
+            let hs = read_frame::<_, Handshake>(&mut reader)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(hs.protocol_version, crate::ipc::message::PROTOCOL_VERSION);
-            
-            write_frame(&mut write_half, &Response::Ok("mock-server".into())).await.unwrap();
+
+            write_frame(&mut write_half, &Response::Ok("mock-server".into()))
+                .await
+                .unwrap();
         });
 
         let client = Client::connect().await;

@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-21
+
 ### Added
 
 - `owl monit` 升级为交互式 TUI 面板（`ratatui + crossterm`），保留 `--json/--count` 脚本模式。
@@ -14,6 +16,13 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- `apply` 以应用组为单位更新全部实例，并收敛 `instances`；多实例启动/扩容增加
+  全量端口预校验与失败回滚。
+- 端口范围现在严格执行上界；进程名称拒绝路径分隔符，避免日志路径逃逸。
+- stdout/stderr 改由每应用单一日志 writer 串行写入和轮转；状态与日志目录默认私有。
+- `state.json` schema 升级至 v2，损坏或版本过新时拒绝覆盖原状态，并增加 fsync 写入。
+- 非回环 HTTP API 必须设置 `OWL_API_TOKEN`。
+- `reload` 复用 `--wait-ready` 的健康检查 / TCP / 最小存活判定。
 - `owl logs -n` 支持跨当前日志、轮转文件与 `.gz` 日期归档聚合读取尾部。
 - 子进程日志补齐按日期切分与 gzip 归档能力。
 

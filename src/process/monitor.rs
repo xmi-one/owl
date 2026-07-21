@@ -25,9 +25,7 @@ pub struct Monitor {
 
 impl Monitor {
     pub fn new() -> Self {
-        Monitor {
-            sys: System::new(),
-        }
+        Monitor { sys: System::new() }
     }
 
     /// 对给定 PID 集合做一次定向刷新并返回指标。空集合直接返回空。

@@ -79,7 +79,10 @@ async fn http_probe(url: &str, timeout: Duration) -> bool {
 fn status_ok(buf: &[u8]) -> bool {
     let text = String::from_utf8_lossy(buf);
     let line = text.lines().next().unwrap_or("");
-    let code = line.split_whitespace().nth(1).and_then(|c| c.parse::<u16>().ok());
+    let code = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse::<u16>().ok());
     matches!(code, Some(c) if (200..400).contains(&c))
 }
 
@@ -147,4 +150,3 @@ mod tests {
         assert!(elapsed < Duration::from_secs(3));
     }
 }
-
